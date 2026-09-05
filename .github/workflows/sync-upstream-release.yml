@@ -46,7 +46,7 @@ jobs:
         with:
           ref: ${{ env.SYNC_BRANCH }}
           fetch-depth: 0
-          token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Merge upstream tag into fork branch
         if: steps.check.outputs.exists == 'false'
