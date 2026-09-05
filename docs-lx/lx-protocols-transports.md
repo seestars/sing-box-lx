@@ -325,12 +325,17 @@ WireGuard endpoint, **byte-identical to upstream behavior**.
 The runtime is backed by `Leadaxe/wireguard-go` (sagernet/wireguard-go + AmneziaWG
 obfuscation, wired via the `submodules/wireguard-go` submodule).
 
-## 2.1 The model: AWG1 vs AWG2
+## 2.1 The model: AWG1 vs AWG2 vs AWG3
 
 - **AWG1** = the junk/signature/magic-header fields: `jc`, `jmin`, `jmax`, `s1`,
   `s2`, `h1`–`h4` (single values).
 - **AWG2** = AWG1 **plus** the CPS packets `i1`–`i5`, the AWG-2.0 junk-size params
   `s3`/`s4`, and **ranged** magic headers (`"min-max"` form of `h1`–`h4`).
+- **AWG3** (amneziawg-go v3.0 / v3.1, the `amnezia-awg2` container with
+  `protocol_version` 3.x) = AWG2 **plus** header protection
+  (`header_protection_key`), content padding (`content_padding_addition`), random
+  trailers, disabled cookies, ranged timing overrides and a ranged
+  `persistent_keepalive_interval` — see [§2.10](#210-awg-3x-header-protection-padding-trailers-timings).
 
 Both client and server must run AmneziaWG with **matching** parameters — the junk
 and I-packets are *configuration*, not negotiated. Set them from the same
@@ -535,12 +540,19 @@ Map an `awg.conf` / awg-quick file directly:
 | `[Interface] Jc / Jmin / Jmax / S1–S4 / I1–I5` | endpoint root `jc` / `jmin` / `jmax` / `s1`–`s4` / `i1`–`i5` |
 | `[Interface] H1 = N` | endpoint root `"h1": N` (JSON **number**) |
 | `[Interface] H1 = N-M` (AWG2 export) | endpoint root `"h1": "N-M"` (JSON **string**, verbatim) |
+| `[Interface] HeaderProtectionKey = <base64>` (AWG3) | endpoint root `"header_protection_key": "<base64>"` (verbatim) |
+| `[Interface] ContentPaddingAddition / RekeyAfterTime / RekeyTimeout / RejectAfterTime / KeepaliveTimeout / MaxHandshakeAttempts = N-M` (AWG3) | endpoint root `content_padding_addition` / `rekey_after_time` / `rekey_timeout` / `reject_after_time` / `keepalive_timeout` / `max_handshake_attempts` — `"N-M"` string (or a number `N`) |
+| `[Interface] RandomTrailers / DisableCookies = on` (AWG3) | endpoint root `"random_trailers": true` / `"disable_cookies": true` |
 | `[Peer] PublicKey / PresharedKey` | `peers[0].public_key` / `pre_shared_key` |
 | `[Peer] Endpoint host:port` | `peers[0].address` + `peers[0].port` |
-| `[Peer] AllowedIPs / PersistentKeepalive` | `peers[0].allowed_ips` / `persistent_keepalive_interval` |
+| `[Peer] AllowedIPs / PersistentKeepalive` | `peers[0].allowed_ips` / `persistent_keepalive_interval` (`N`, or `"N-M"` for an AWG3 range) |
 
 If the `awg.conf` omits `MTU` or sets the WireGuard-default `1420`, lower it for
 AWG2 (see [§2.6](#26-mtu-budget)).
+
+The Amnezia app's `vpn://` export carries the same keys (`awg` → `last_config` →
+`config` is the `.conf` text above); `protocol_version: "3.1"` there marks an AWG3
+server.
 
 ## 2.8 Examples
 
@@ -578,6 +590,48 @@ AWG2 (see [§2.6](#26-mtu-budget)).
 }
 ```
 
+### AmneziaWG 3.1 endpoint (`amnezia-awg2` export, `protocol_version` 3.1)
+
+The full parameter set of a live AWG 3.1 server, copied 1:1 from its `.conf`
+(`H1`–`H4` stay at the WireGuard defaults — with header protection the type word is
+masked anyway). Verified end-to-end against that server (SPEC 080).
+
+```jsonc
+{
+  "type": "wireguard",
+  "tag": "awg3-out",
+  "system": false,
+  "mtu": 1376,
+  "address": ["10.8.1.7/32"],
+  "private_key": "<client-private-key-base64>",
+
+  "jc": 4, "jmin": 10, "jmax": 50,
+  "s1": 55, "s2": 42, "s3": 40, "s4": 12,          // each >= 12: they carry the header-cipher nonce
+  "h1": 1, "h2": 2, "h3": 3, "h4": 4,
+
+  "header_protection_key": "<HeaderProtectionKey-base64>",   // server-side: must equal the server's
+  "content_padding_addition": "10-100",
+  "rekey_after_time": "100-120",
+  "rekey_timeout": "3-7",
+  "reject_after_time": "150-180",
+  "keepalive_timeout": "5-15",
+  "max_handshake_attempts": "15-20",
+  "random_trailers": true,
+  "disable_cookies": true,
+
+  "peers": [
+    {
+      "address": "77.239.123.44",
+      "port": 30565,
+      "public_key": "<server-public-key-base64>",
+      "pre_shared_key": "<preshared-key-base64>",
+      "allowed_ips": ["0.0.0.0/0", "::/0"],
+      "persistent_keepalive_interval": "25-35"    // AWG3 range; a plain number still works
+    }
+  ]
+}
+```
+
 ### Masquerade sugar (Cloudflare WARP, QUIC profile)
 
 ```jsonc
@@ -607,12 +661,66 @@ AWG2 (see [§2.6](#26-mtu-budget)).
 | domain with `\r\n` / `;` / `@` / space | `amneziawg: invalid masquerade domain "...": illegal character (only a-z A-Z 0-9 - _ allowed)` |
 | `ib` not in the set | `amneziawg: unknown masquerade browser "safari"; one of chrome\|firefox\|curl` |
 | `ib` with `ip≠quic` | `amneziawg: ib (browser) is only meaningful with ip=quic, got ip="dns"` |
+| `header_protection_key` with any of `s1`–`s4` below 12 | `amneziawg: s4=8 is too short for header_protection_key: each of s1-s4 must be at least 12 bytes (the padding carries the header cipher nonce)` |
+| `header_protection_key` not base64 / not 32 bytes / all zeros | `amneziawg: decode header_protection_key (expected base64, as printed by \`awg genkey\`)` / `… must decode to 32 bytes, got N` / `… is all zeros (the device treats that as "off"); omit the field instead` |
+| a ranged field with start > end, or garbage | `invalid range "180-150": range start > end` (the offending key is named: `reject_after_time: …`) |
+| `persistent_keepalive_interval` range, built without `with_awg` | `AmneziaWG (awg) support is not included in this build (persistent_keepalive_interval range), rebuild with -tags with_awg` |
 
 The domain passes **strict LDH validation** (like a WireSock SNI): labels of
 `a-z A-Z 0-9 - _`, ≤63 bytes, no leading/trailing hyphen; the whole name ≤253, no
 leading dot; one trailing dot allowed. This is a security boundary — the domain goes
 into SIP text and a DNS QNAME, so control bytes and metacharacters are rejected
 (injection defense).
+
+## 2.10 AWG 3.x: header protection, padding, trailers, timings
+
+AmneziaWG 3.0 (amneziawg-go v3.0.0, tools v3.0.20260730) and 3.1 (v3.1.2026081x)
+added a second layer on top of the AWG2 shape tricks. All of it is configured on the
+endpoint root like the AWG2 fields and needs `with_awg`. Amnezia's `amnezia-awg2`
+container with `protocol_version: "3.1"` exports exactly this set.
+
+**Which side must match.** AmneziaWG distinguishes *server-side* parameters (both ends
+must hold the same value — a mismatch means no handshake, silently) from *client-side*
+ones (local behaviour, the server does not care). Only `header_protection_key` is
+server-side here; everything else is client-side — but copy the server's values anyway,
+they were tuned together.
+
+| Key | Type | Default | Side | Meaning |
+|-----|------|---------|------|---------|
+| `header_protection_key` | base64 string (32 bytes, `awg genkey`) | `""` (off) | **server** | Encrypts the low-entropy header of every packet: for a handshake message the whole message, for a data packet the 16-byte header (type, receiver index, counter). ChaCha20 keyed with this key and a per-datagram nonce = the first 12 bytes of the message's random padding — hence **each of `s1`–`s4` must be ≥ 12**. With it on, the `h1`–`h4` magic values become irrelevant (the type word is random on the wire) and AWG3 exports leave them at `1`–`4`. |
+| `content_padding_addition` | int \| `"min-max"` | `""` (off) | client | Extra zero bytes appended to the plaintext of **every data packet** (inside the AEAD, so random on the wire), picked from the range per packet, **instead of** WireGuard's pad-to-multiple-of-16. Capped so the datagram never exceeds the largest datagram already seen on this peer's path (the "UDP window", starting at 500 B) — a full-MTU packet gets no addition. |
+| `random_trailers` | bool | `false` | client | A random-length random tail after every **handshake** message (init/response/cookie) and, via the same UDP-window rule, inside data packets when no `content_padding_addition` is set — so no message kind has a fixed size. The receiver accepts handshake datagrams *longer* than expected and discards the tail. |
+| `disable_cookies` | bool | `false` | client | Never send a cookie reply and skip the under-load mac2 gate that would demand one (a cookie exchange has a recognisable shape). |
+| `rekey_after_time` | int \| `"min-max"` seconds | `""` (WireGuard 120) | client | When the initiator starts a fresh handshake. Picked from the range at each check. |
+| `rekey_timeout` | int \| `"min-max"` seconds | `""` (WireGuard 5) | client | Spacing between handshake retransmits (jitter is still added). The range **minimum** is the floor between two initiations. |
+| `reject_after_time` | int \| `"min-max"` seconds | `""` (WireGuard 180) | client | After this a keypair is refused. The range **maximum** is used wherever the protocol must not expire keys early. |
+| `keepalive_timeout` | int \| `"min-max"` seconds | `""` (WireGuard 10) | client | Passive keepalive after received data. |
+| `max_handshake_attempts` | int \| `"min-max"` | `""` (WireGuard 18) | client | Retransmits before giving up on a handshake cycle (then SPEC 041's self-heal rebind runs as before). Re-picked per cycle. |
+| `peers[].persistent_keepalive_interval` | int \| `"min-max"` seconds | `0` (off) | client | The WireGuard number, or an AWG3 range re-picked at every arming. |
+
+Notes:
+
+- The header-protection nonce comes from the **padding**, so on a plain-size handshake
+  (`s1`=0) the key cannot be used at all — the config check refuses it
+  ([§2.9](#29-validation-errors-verbatim)), as does the device.
+- `content_padding_addition` and `random_trailers` grow packets: the MTU budget of
+  [§2.6](#26-mtu-budget) is unchanged (the UDP-window cap keeps additions inside sizes
+  the path already carried), but keep `mtu` at the server-recommended value (`1376` in
+  the Amnezia export).
+- `random_trailers` widens the receiver's classification: any datagram **longer** than
+  `s1`+148 / `s2`+92 / `s3`+64 is *also* tried as a handshake message by its type word.
+  With single-value `h1`–`h4` (the AWG3 default) that is a 2⁻³² false match; with
+  wide AWG2 **ranges** for `h1`–`h4` the false-match rate becomes the range width /
+  2³² per data packet, which then fails its MAC and is dropped. Don't combine
+  `random_trailers` with wide `h1`–`h4` ranges — a reference-implementation
+  property, kept 1:1 for wire compatibility.
+- The timing overrides don't need to match the server, but nonsense (e.g.
+  `rekey_after_time` above `reject_after_time`) makes the tunnel flap. Copy the
+  server's export.
+- Everything here is byte-compatible with amneziawg-go v3.1 (commit `b5928ef`,
+  2026-08-28): the same nonce/keystream layout, the same classification order, the
+  same padding/trailer rules. Verified against a live `protocol_version 3.1` server —
+  [SPEC 080](../SPECS/TASKS/080-AWG3_HEADER_PROTECTION_TIMINGS/SPEC.md).
 
 ---
 
@@ -656,7 +764,7 @@ registration (ECDSA keys, WARP enroll) is done by the client, not the core.
 | `tls` | object | — | — | the **standard** outbound TLS block — `server_name`, `insecure`, `disable_sni`, `fragment`, `record_fragment`, `fragment_fallback_delay`, … Same container every other TLS outbound uses |
 | `uri` | string | — | per profile³ | CONNECT-IP request URI |
 | `mtu` | int | — | `1280` | userspace-stack MTU. On `h2`, max `16000` (one IP packet = one HTTP/2 DATA frame) |
-| `idle_timeout` | duration | — | `5m` | suspend the tunnel after this long with no traffic (frees the gVisor stack, pumps and QUIC keepalive); the next dial rebuilds it. **Negative disables suspend** |
+| `idle_timeout` | duration | — | off | suspend the tunnel after this long with no traffic (frees the gVisor stack, pumps and QUIC keepalive); the next dial rebuilds it. **Off by default**: absent, `0` and negative all keep the tunnel up; only a positive value enables suspend |
 | `keep_alive_period` | duration | — | `30s` | QUIC keepalive (h3 only). **Negative disables** |
 | `network_list` | list | — | tcp+udp | L4 protocols routed through the tunnel |
 
@@ -755,15 +863,21 @@ To pin a config to one leg, set the single field: `"vhttp": "h3"` or `"vhttp": "
 
 ## 3.8 Idle-suspend & keepalive
 
-- `idle_timeout` (default `5m`) suspends the tunnel after that long with no traffic,
-  freeing the gVisor stack, the pumps and the QUIC keepalive; the next dial rebuilds
-  it. A negative value disables suspend.
+- `idle_timeout` suspends the tunnel after that long with no traffic, freeing the
+  gVisor stack, the pumps and the QUIC keepalive; the next dial rebuilds it.
+  **Off by default** (since lx.31): absent, `0` and negative all keep the tunnel up
+  until the outbound is closed; only a positive value (e.g. `"5m"`) enables suspend.
+  Waking a suspended tunnel costs a full QUIC handshake + CONNECT-IP + a fresh gVisor
+  stack on the first request after the quiet spell, which on routers and desktops is
+  a worse trade than the ~6 MB RSS and one keepalive packet per 30s it saves. Enable
+  it explicitly on battery-powered hosts where that trade flips.
 - `keep_alive_period` (default `30s`, h3 only) is the QUIC keepalive interval. A
   negative value disables it.
-- **Interaction:** with a short `idle_timeout` the tunnel is usually torn down
-  before keepalive matters. Do **not** disable keepalive (`-1s`) together with a
-  large `idle_timeout` — the server may drop the tunnel on its own idle before our
-  suspend fires.
+- **Interaction:** with suspend off, keepalive is what holds the tunnel through the
+  server's idle-timeout and the provider's UDP NAT mapping — do **not** disable it
+  (`-1s`) unless `idle_timeout` is short enough that the tunnel is torn down before
+  keepalive matters; otherwise the server drops the tunnel on its own idle and the
+  next dial pays a silent rebuild.
 - The exit IP **changes** after idle-suspend/reconnect — WARP anycast hands out a
   different edge address on each new connection. The internal `ip`/`ipv6` stays
   stable.
@@ -850,7 +964,7 @@ Same as above with one field changed:
 ```
 
 (profile=cloudflare, vhttp=h3, `tls.server_name`=`www.cloudflare.com`,
-uri=`https://cloudflareaccess.com`, mtu=1280, idle_timeout=5m,
+uri=`https://cloudflareaccess.com`, mtu=1280, idle_timeout=off,
 keep_alive_period=30s, network_list=tcp+udp — all default. Remember the top-level
 `dns` block.)
 

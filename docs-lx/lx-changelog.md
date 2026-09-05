@@ -28,6 +28,75 @@ required for stable tags); this changelog section is the fallback used for pre-r
 > тогда. Пользовательские ноты билингвальны там, где это важно, — в
 > [`releases/`](releases/).
 
+#### v1.14.0-lx.32
+
+Стабильный релиз. Пользовательские ноты (EN+RU):
+[`docs-lx/releases/v1.14.0-lx.32.md`](releases/v1.14.0-lx.32.md).
+
+**Что вошло:**
+
+- ✨ **AmneziaWG 3.0/3.1** ([SPEC 080](../SPECS/TASKS/080-AWG3_HEADER_PROTECTION_TIMINGS/SPEC.md)).
+  Порт amneziawg-go `v0.2.19 → v3.1.20260828` в прививку `submodules/wireguard-go`:
+  защита заголовка `header_protection_key` (ChaCha20, nonce из паддинга `s1–s4`, поэтому
+  каждый ≥ 12), `content_padding_addition`, `random_trailers`, `disable_cookies`,
+  диапазонные тайминги `rekey_after_time` / `rekey_timeout` / `reject_after_time` /
+  `keepalive_timeout` / `max_handshake_attempts` и диапазонный
+  `persistent_keepalive_interval` пира (`"25-35"`; число работает как раньше). Все
+  поля на корне `wireguard`-endpoint, как и AWG2; экспорт Amnezia `amnezia-awg2`
+  (`protocol_version 3.1`) переносится 1:1. Без `with_awg` новые поля (и диапазонный
+  keepalive) отвергаются, число проходит. `sing-box check` ловит ключ с коротким
+  паддингом и битый ключ с именем поля. Проверено против живого AWG 3.1-сервера:
+  хендшейк с первой попытки, TLS, 1 МБ загрузка, rekey по диапазону. Отличие от
+  референса: первый батч после старта переносится под актуальный `s4`, а не уезжает
+  в старой раскладке. Новый CI-пример `lx-test/config/awg3_full.json`. Доки:
+  `lx-protocols-transports{,.ru}.md` §2.10, `lx-config{,.ru}.md`.
+  Внутри `option`: `MagicHeader` стал алиасом общего `AWGRange`; тип
+  `WireGuardPeer.PersistentKeepaliveInterval` — `AWGRange` (JSON-совместимо).
+  Сабмодуль `wireguard-go` → `ba01446` (ветка `lx-awg2-v005`). Прогон перед тегом:
+  юниты сабмодуля (в т.ч. `-race` по AWG), option/transport под обоими тегами,
+  loopback-e2e двух экземпляров ядра для plain WG / AWG2 (диапазонные `h1–h4`, `s4=9`) /
+  AWG3 через реальные UDP-сокеты, живой AWG 3.1-сервер. Android-AAR на устройстве
+  не гонялся: протокольный код платформенно-нейтрален, но AWG2-пользователям на
+  Android стоит проверить хендшейк на первом старте.
+- 📌 **Дрейф апстрима отложен сознательно** (как в lx.30/lx.31): `upstream/stable` ушёл на
+  308 коммитов от нашей базы (`b5ebaa1fc`, `v1.14.0`); затронуты все наши зоны
+  (`box.go`, `route/`, `dns/`, wireguard-транспорт, `.pb.go`), мерж — отдельная задача
+  класса SPEC 051 с проверкой сабмодулей до ядра. Релиз несёт только AWG3 поверх
+  прежней базы.
+
+#### v1.14.0-lx.31
+
+Стабильный релиз. Пользовательские ноты (EN+RU):
+[`docs-lx/releases/v1.14.0-lx.31.md`](releases/v1.14.0-lx.31.md).
+
+**Что вошло:**
+
+- ✨ **`with_tailscale` в desktop- и роутерных бинарях** (решение владельца 2026-09-04,
+  SPEC 004). Апстримные endpoint `tailscale`, DNS-транспорт `tailscale`, certificate
+  provider и сервис `derp` теперь доступны во всех архивах релиза: darwin/windows ×
+  amd64/arm64, Win7-386, linux-amd64/arm64/armv7/mipsle-softfloat (musl) и
+  linux-mips-softfloat. Чистый Go, собирается `CGO_ENABLED=0` против наших сабмодулей
+  wireguard-go/sing-tun/gvisor; проверено сборкой на всех шести целях и живым стартом
+  endpoint'а на darwin (tsnet поднимается, уходит на control-plane в login). Цена — только
+  размер: ~+13 МБ darwin/arm64 (49.8 → 63.2), ~+16 МБ mips softfloat (56.2 → 72.2).
+  Android-AAR тег по-прежнему **не** несёт (`lx:no-tailscale` в `build_libbox`): у LxBox нет
+  UI под tailscale, а это самая тяжёлая зависимость APK. Тег добавлен в `LX_TAGS`
+  (`Makefile.lx`) и `BASE_TAGS` (`lx-ci.yml`); README/SPEC 004 обновлены.
+- 📌 **Дрейф апстрима отложен сознательно:** `upstream/stable` ушёл на 308 коммитов от
+  merge-base (замер 2026-09-04; 301 на момент lx.30). Мерж — отдельная задача класса
+  SPEC 051 (813 файлов, задеты все наши зоны), в этот тег не берётся.
+
+- 🔧 **MASQUE: idle-suspend туннеля по умолчанию выключен** (SPEC 021 B1, решение
+  владельца 2026-09-03). Раньше без ключа `idle_timeout` туннель засыпал через 5 минут
+  тишины на любой платформе — роутеры и десктопы платили за это полным QUIC-хендшейком +
+  CONNECT-IP + новым gVisor-стеком на первом запросе после каждой паузы, а экономили ~6 МБ
+  RSS и один keepalive-пакет в 30 с. Теперь suspend включает **только положительное**
+  значение (`"5m"`); отсутствие ключа, `"0s"` и отрицательное равнозначны и держат
+  туннель до закрытия outbound'а, его живость обеспечивает `keep_alive_period` (30s).
+  Кто хочет прежнее поведение (батарейные хосты) — ставит `"idle_timeout": "5m"` явно.
+  Ядро: `protocol/masque/outbound.go` (`idleWindow`), комментарий `option/masque.go`;
+  тест `idle_default_lx_test.go`; доки §3.8 EN/RU, lx-config, SPEC 021 SPEC/CONFIG.
+
 #### v1.14.0-lx.27
 
 Стабильный релиз линии `lx.27` — сводит rc.1–rc.6. Пользовательские ноты (EN+RU):
