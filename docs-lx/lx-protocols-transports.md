@@ -8,7 +8,7 @@ features of `sing-box-lx`:
 | Feature | Build tag | Where it attaches | Chapter |
 |---------|-----------|-------------------|---------|
 | **XHTTP** transport (Xray "splithttp"/"xhttp") | `with_xhttp` | `transport` block of a VLESS / VMess / Trojan **outbound** | [§1](#1-xhttp-transport) |
-| **AmneziaWG 2.0** (AWG2) obfuscation | `with_awg` | promoted fields on a `wireguard` **endpoint** | [§2](#2-amneziawg-20-awg2) |
+| **AmneziaWG 2.0/3.x** (AWG2, AWG3) obfuscation | `with_awg` | promoted fields on a `wireguard` **endpoint** | [§2](#2-amneziawg-203x-awg2-awg3) |
 | **MASQUE** outbound (CONNECT-IP / WARP) | `with_quic` + `with_gvisor` | `outbounds[].type: "masque"` | [§3](#3-masque-outbound-connect-ip--warp) |
 
 For a high-level tour of every downstream feature (idle-suspend, DNS group, VLESS
@@ -54,8 +54,8 @@ transport (which would defeat the obfuscation). The exact messages:
   - [1.9 Range value forms](#19-range-value-forms)
   - [1.10 Examples](#110-examples)
   - [1.11 Troubleshooting](#111-troubleshooting)
-- [§2 AmneziaWG 2.0 (AWG2)](#2-amneziawg-20-awg2)
-  - [2.1 The model: AWG1 vs AWG2](#21-the-model-awg1-vs-awg2)
+- [§2 AmneziaWG 2.0/3.x (AWG2, AWG3)](#2-amneziawg-203x-awg2-awg3)
+  - [2.1 The model: AWG1 vs AWG2 vs AWG3](#21-the-model-awg1-vs-awg2-vs-awg3)
   - [2.2 Junk & signature fields](#22-junk--signature-fields)
   - [2.3 Magic headers `h1`–`h4`](#23-magic-headers-h1h4)
   - [2.4 CPS decoys `i1`–`i5` and the tag format](#24-cps-decoys-i1i5-and-the-tag-format)
@@ -64,6 +64,7 @@ transport (which would defeat the obfuscation). The exact messages:
   - [2.7 Mapping an `awg.conf` 1:1](#27-mapping-an-awgconf-11)
   - [2.8 Examples](#28-examples)
   - [2.9 Validation errors (verbatim)](#29-validation-errors-verbatim)
+  - [2.10 AWG 3.x: header protection, padding, trailers, timings](#210-awg-3x-header-protection-padding-trailers-timings)
 - [§3 MASQUE outbound (CONNECT-IP / WARP)](#3-masque-outbound-connect-ip--warp)
   - [3.1 What it is](#31-what-it-is)
   - [3.2 MASQUE-specific fields](#32-masque-specific-fields)
@@ -314,9 +315,10 @@ An empty value selects the documented default.
 
 ---
 
-# 2. AmneziaWG 2.0 (AWG2)
+# 2. AmneziaWG 2.0/3.x (AWG2, AWG3)
 
-AWG is WireGuard + DPI-evasion obfuscation. It is configured as a normal sing-box
+AWG is WireGuard + DPI-evasion obfuscation: AWG2 reshapes the packets, AWG3 additionally
+encrypts their headers and randomises sizes and timings ([§2.10](#210-awg-3x-header-protection-padding-trailers-timings)). It is configured as a normal sing-box
 **`wireguard` endpoint** with extra promoted fields (all at the endpoint **root**,
 none on a peer — mirroring an `awg-quick` `.conf` `[Interface]` section). With
 `with_awg` these are pushed to the device; a config without any AWG field is a plain
@@ -711,9 +713,13 @@ Notes:
   `s1`+148 / `s2`+92 / `s3`+64 is *also* tried as a handshake message by its type word.
   With single-value `h1`–`h4` (the AWG3 default) that is a 2⁻³² false match; with
   wide AWG2 **ranges** for `h1`–`h4` the false-match rate becomes the range width /
-  2³² per data packet, which then fails its MAC and is dropped. Don't combine
-  `random_trailers` with wide `h1`–`h4` ranges — a reference-implementation
-  property, kept 1:1 for wire compatibility.
+  2³² per data packet, which then fails its MAC and is dropped. **Our receiver is
+  immune** (SPEC 081): a datagram carrying one of our live receiver indices behind a
+  transport type word is classified as data before the handshake candidates run, so
+  the downlink never loses packets this way — nor to the narrower AWG2 variant (a data
+  datagram of exactly `s1`+148 bytes). The server's receiver is the reference
+  implementation, so the **uplink** still is: don't combine `random_trailers` with wide
+  `h1`–`h4` ranges.
 - The timing overrides don't need to match the server, but nonsense (e.g.
   `rekey_after_time` above `reject_after_time`) makes the tunnel flap. Copy the
   server's export.
@@ -995,5 +1001,5 @@ on-device.
   `encryption`, `lxd`, observability).
 - **[lx-energy.md](lx-energy.md)** — the energy model, idle-suspend timelines and the
   recommended mobile configuration (relevant to AWG and MASQUE endpoint suspend).
-- Feature specs: [XHTTP](../SPECS/FEATURES/002-XHTTP/), [AWG2](../SPECS/FEATURES/003-AWG2/),
+- Feature specs: [XHTTP](../SPECS/FEATURES/002-XHTTP/), [AWG](../SPECS/FEATURES/003-AWG/),
   [MASQUE/WARP](../SPECS/FEATURES/009-MASQUE_WARP/).

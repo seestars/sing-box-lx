@@ -152,7 +152,7 @@ This is the **only profile device-proven against a real LTE/WARP DPI** (~330 ms)
 `sip` are implemented as correct client-initiated requests but are blocked as a protocol class
 toward the Cloudflare WARP edge (raw DNS/STUN/SIP to a datacenter IP is itself anomalous) —
 they are kept for other providers whose DPI only checks packet well-formedness. See
-[docs-lx/lx-protocols-transports.md §2](docs-lx/lx-protocols-transports.md#2-amneziawg-20-awg2) and [AWG2 feature](SPECS/FEATURES/003-AWG2/FEATURE.md) · [examples](SPECS/TASKS/009-WIRESOCK_MASQUERADE_PROFILES/EXAMPLES.md).
+[docs-lx/lx-protocols-transports.md §2](docs-lx/lx-protocols-transports.md#2-amneziawg-203x-awg2-awg3) and [AWG2 feature](SPECS/FEATURES/003-AWG2/FEATURE.md) · [examples](SPECS/TASKS/009-WIRESOCK_MASQUERADE_PROFILES/EXAMPLES.md).
 
 ### MASQUE (outbound — Cloudflare WARP)
 
@@ -344,6 +344,7 @@ The core is built for the desktop launcher **singbox-launcher** (which bundles `
 | Protocols & transports | [docs-lx/lx-protocols-transports.md](docs-lx/lx-protocols-transports.md) ([RU](docs-lx/lx-protocols-transports.ru.md)) — full parameter reference for XHTTP, AmneziaWG, MASQUE |
 | Fork changelog | [docs-lx/lx-changelog.md](docs-lx/lx-changelog.md) — the source `lx-release.yml` extracts release notes from |
 | Energy guide | [docs-lx/lx-energy.md](docs-lx/lx-energy.md) — idle-suspend levels, passive_check, tuning |
+| Sniffers | [docs-lx/lx-sniff.md](docs-lx/lx-sniff.md) ([RU](docs-lx/lx-sniff.ru.md)) — `wireguard` / `openvpn` / `ike` / `tailscale` / `sip` for LAN traffic behind a router, default order, first-packet limits |
 | `lxd` operator's guide | [docs-lx/lxd-daemon.md](docs-lx/lxd-daemon.md) ([RU](docs-lx/lxd-daemon.ru.md)) — install, daemon.json, mTLS, admin REST |
 | Observability API | [docs-lx/lxd-grpc-api.md](docs-lx/lxd-grpc-api.md) ([RU](docs-lx/lxd-grpc-api.ru.md)) — the observability contract clients speak (gRPC daemon + Android AAR) |
 | OpenWrt walkthrough | [docs-lx/openwrt-vpn-ssid.md](docs-lx/openwrt-vpn-ssid.md) ([RU](docs-lx/openwrt-vpn-ssid.ru.md)) — VPN on a dedicated SSID |

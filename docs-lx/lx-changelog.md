@@ -28,6 +28,137 @@ required for stable tags); this changelog section is the fallback used for pre-r
 > тогда. Пользовательские ноты билингвальны там, где это важно, — в
 > [`releases/`](releases/).
 
+#### v1.14.0-lx.35
+
+Стабильный релиз, хотфикс. Пользовательские ноты (EN+RU):
+[`docs-lx/releases/v1.14.0-lx.35.md`](https://github.com/Leadaxe/sing-box-lx/blob/lx/docs-lx/releases/v1.14.0-lx.35.md).
+
+**Что вошло:**
+
+- 🔥 **Issue #14, корень: утечка типа `http2.StreamError` из транспортных conn'ов →
+  спин readLoop у потребителя** ([SPEC 082](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/082-H2_STREAM_ERROR_TYPE_LEAK/SPEC.md)).
+  Профиль с lx.30: тел кадров 0.1 с из 36, `readRecordOrCCS` без детей, две readLoop в
+  `runnable` на `x/net transport.go:1886` — кадров от CDN нет, крутится залипшая в
+  `crypto/tls` ошибка, которую `run()` принимает за ошибку своего стрима. SPEC 076/077 к
+  этому циклу не относились. Фикс: `common/badh2.HideStreamError` (тот же текст, без
+  `Unwrap`) в шести точках XHTTP, в `v2rayhttp.HTTP2Conn` и `v2raygrpclite.GunConn`
+  (поверх `baderror.WrapH2`, который пропускал `INTERNAL_ERROR`). Регрессия воспроизводит
+  спин на Mac. Полевая проверка репортёром — по критерию §5 спеки.
+- База апстрима без изменений: `upstream/stable` a25ad8ce5 (`v1.14.0` + 16), дрейф 0.
+
+#### v1.14.0-lx.34
+
+Стабильный релиз. Пользовательские ноты (EN+RU):
+[`docs-lx/releases/v1.14.0-lx.34.md`](https://github.com/Leadaxe/sing-box-lx/blob/lx/docs-lx/releases/v1.14.0-lx.34.md).
+
+**Что вошло:**
+
+- 🔄 **Дрейф апстрима закрыт: база — `upstream/stable` a25ad8ce5 (`v1.14.0` + 16
+  пострелизных коммитов).** Мерж `03e309113`: по subject не хватало 69 коммитов (по хешам
+  308 — апстрим переписывает историю, testing-контент лежал у нас с другими хешами),
+  реальный объём 207 файлов. Прямой `git merge` дал 125 конфликтов; 74 файла без наших
+  коммитов взяты у апстрима как есть, 51 lx-файл прошёл per-file 3-way с чистой апстримной
+  базой — честных конфликтов осталось 13, все на lx-швах. Три молчаливых автослияния
+  (задвоенный `DNSResponseAddresses` в `adapter/inbound.go`, `protocol/tun/inbound.go`,
+  `log/factory.go`) сняты сверкой zero-lx файлов с апстримом. `*.pb.go` регенерированы
+  `protogen` из разрешённого `.proto` (наш rpc/message-блок + апстримное `certDomains = 15`).
+  После мержа `merge-base == tip`, простой замер из
+  [раннбука](https://github.com/Leadaxe/sing-box-lx/blob/lx/docs-lx/lx-release-runbook.md)
+  снова работает.
+- 📦 **Форк-сабмодули закрыты до мержа ядра** (`f74a67bc3`): `wireguard-go` → `d842fd5`
+  = v0.0.5 (cherry-pick `conn: Add I/O activity callbacks to StdNetBind`, merge-base ==
+  пин, слился чисто); `sing-tun` перепривит на `up/main` 1bd9bb8 (`8fac85a` — ровно то,
+  что требует `go.mod` апстрима): взяты `Fix TCP NAT port reuse across address families`,
+  `Fix panic on TCP packets of an unconfigured address family`, `Fix prerouting pre-match
+  chain evaluated after DNAT`; SPEC 040 переложен поверх — `acceptLoop(listener, tcpNat,
+  isIPv6)` из-за разделения `tcpNat4`/`tcpNat6`, старая линия сохранена как
+  `lx-archive-20260905`. gvisor без изменений (пин 20260727 совпадает).
+  `go list -m` всех трёх → `./submodules/*`.
+- 🧭 **urltest переложен на новый апстримный прогон** (`URLTestOutbounds`/`urlTestBatch`,
+  «Test nested groups recursively in URLTest» + «Fix URLTest group hang on unresponsive
+  outbound»): пул round_robin и `passive_check`
+  ([SPEC 019](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/019-URLTEST_MODE_STICKY/SPEC.md)),
+  штрафы через хук `onAlive`
+  ([SPEC 054](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/054-URLTEST_PENALTY_FAILOVER/SPEC.md)),
+  batch-ctx
+  ([SPEC 050](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/050-URLTEST_ZOMBIE_RUN_SURVIVES_RESTART/SPEC.md))
+  сохранены. Сигнатуры приведены к апстримным: `RealTag(outboundManager, detour)`,
+  `CheckOutbounds(ctx, force)`, `InterfaceUpdated(ctx)`, `ResetNetwork(ctx)`;
+  `adapter.OutboundTag` удалён апстримом → `group.RealTag`. Изменение поведения:
+  ручной URL-тест группы теперь всегда тестирует все узлы (апстримная семантика
+  `force`), для round_robin — с перестройкой пула.
+- ✂️ **Шов `needObservable` в `box.go` снят**: апстрим сам перестал форсить Clash-сервер от
+  `PlatformLogWriter` (критерий снятия из
+  [SPEC 014](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/014-CLASH_API_TO_COMMANDCLIENT_MIGRATION/SPEC.md)
+  §3.3 выполнен). Ротация архива OOM-отчётов
+  ([SPEC 039](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/039-REPORT_ARCHIVE_ROTATION/SPEC.md))
+  перенесена в `OwnerCallback` нового `oomkiller.Recorder` и в `PromoteOOMDraftAt`.
+- 🐛 **Гонка `NetworkManager.started`** (`0df95da5a`): lx-ci (`go test -race ./lxd/`)
+  поймал апстримную data race — запись на стадии PostStart против чтения из фоновой
+  горутины `updateInterface`, которую апстрим увёл в `go` («Handle network update
+  callbacks in background»). Поле стало `atomic.Bool`; в `upstream/testing` фикса нет.
+- 📥 **Из апстрима, заметное для форка:** DDR-запросы (`_dns.*` SVCB) отбиваются пустым
+  ответом; инвертированные DNS-правила с адресными фильтрами из rule-set снова матчатся;
+  fakeip UDP reply mapping; колбэки смены интерфейса в фоне с отменой предыдущего; двойной
+  bind UDP-сокета при auto-detect; Clash-режим вынесен в `experimental/clashmode` и живёт
+  без Clash-сервера (`GetClashModeStatus` в daemon); QUIC congestion control не проседает
+  после простоя (TUIC/naive; из naive убраны `bbr2`-варианты); WG-эндпоинт дропает пакеты
+  на не-IP адреса вместо ошибки (`common/iponly`); daemon «Fix start or reload race»;
+  меньше аллокаций в правилах/логе/кеше; bbolt flock/recover; power report
+  (`service/powerreport`) и непрерывный OOM-рекордер; websocket early data с smux/yamux.
+  Зависимости: sing v0.9.0, sing-quic v0.7.0, quic-go mod.7, tailscale mod.4,
+  NaiveProxy v150.0.7871.63-2 (`CRONET_GO_VERSION` → 45832ab0, musl-зеркало
+  перезапущено).
+- 🧰 **Тулчейн:** апстримные workflow и win7-скрипт — go 1.26.7 (взяты как есть), наш пин
+  `go.version` остаётся go1.26.6 до девайс-прогона AAR
+  ([SPEC 044](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/044-ANDROID_AAR_GO124_QUIC_DEAD/SPEC.md));
+  `release/LDFLAGS` без `tlsunsafeekm`; `Make badlinkname without bad linkname` не снимает
+  `-checklinkname=0`.
+- ✅ **Проверки:** `go build ./...`, полный `LX_TAGS` (`lx-build` + `lx-check`), `go vet`
+  и `go test` горячих пакетов под lx-тегами, `go test -race` lxd с тегами lx-ci (×3),
+  lx-ci на пуше и ручной полный прогон (cross, musl, AAR); ядро подменено в лаунчере
+  владельца (darwin/arm64).
+
+#### v1.14.0-lx.33
+
+Стабильный релиз. Пользовательские ноты (EN+RU):
+[`docs-lx/releases/v1.14.0-lx.33.md`](releases/v1.14.0-lx.33.md).
+
+**Что вошло:**
+
+- ✨ **Снифферы VPN/VoIP для LAN-трафика: `wireguard`, `openvpn`, `ike`, `tailscale`,
+  `sip`** ([FEATURE 016-SNIFF](../SPECS/FEATURES/016-SNIFF/FEATURE.md),
+  [SPEC 078](../SPECS/TASKS/078-WIREGUARD_PACKET_SNIFFER/SPEC.md),
+  [SPEC 079](../SPECS/TASKS/079-VPN_VOIP_PACKET_SNIFFERS/SPEC.md)). Форма первого
+  пакета клиента, каждый сниффер — отдельный `common/sniff/*_lx.go`, апстримные
+  снифферы не правятся: wireguard — типы 1/2/3 по точным размерам 148/92/64, тип 4
+  `len>=32 && (len-32)%16==0`, резервные байты свободны (WARP); openvpn —
+  `HARD_RESET_CLIENT_V2/V3` plain/tls-auth/tls-crypt, TCP за 2-байтной длиной; ike —
+  ISAKMP `IKE_SA_INIT` (v2) и Main/Aggressive (v1), non-ESP-маркер на 4500; tailscale —
+  disco по магии `TS💬`; sip — request-line, `domain` из Request-URI (UDP и TCP).
+  Имена работают в `sniffer` sniff-действия и в `protocol` правил. В дефолтные списки
+  включены под маркером `lx:begin sniff-lx` (`route/route.go`, `route/rule/rule_action.go`,
+  `constant/protocol.go`): packet — после `stun` и **до** uTP (апстримный uTP принимал
+  `01 00 …` за ST_DATA, и plain WG с LAN помечался `bittorrent`), stream — после `rdp`.
+  Юниты (+race), перекрёстный тест дефолтного порядка, прогон через direct-inbound
+  бинаря. Дока: `docs-lx/lx-sniff{,.ru}.md`, строки в `docs/configuration/route/sniff{,.zh}.md`.
+- 🐛 **AWG: приём больше не теряет data-пакеты при широких `h1–h4`**
+  ([SPEC 081](../SPECS/TASKS/081-AWG_RECEIVE_INDEX_FIRST_CLASSIFICATION/SPEC.md)).
+  Референсный порядок классификации (init → response → cookie → transport) присваивал
+  data-датаграмму handshake-кандидату по случайному слову типа: ровно `s1+148` байт у
+  AWG2 (≈8 % таких пакетов при диапазонах из экспортов), любой крупнее при
+  `random_trailers` AWG 3.1. Теперь датаграмма с одним из наших живых receiver index за
+  словом типа transport классифицируется как данные первой; промах — прежний порядок,
+  провод не меняется. Uplink (приёмник сервера) — как раньше. Red/green e2e с
+  детерминированной коллизией размера (`s1=44`, `s4=0`, `h1=5-4294967295`). Сабмодуль
+  `wireguard-go` → `6f0f7a2`.
+- 📌 **Дрейф апстрима отложен сознательно** (как в lx.30–lx.32): `upstream/stable` ушёл на
+  309 коммитов от нашей базы (`b5ebaa1fc`, `v1.14.0`), появились теги `v1.15.0-alpha.1/2`;
+  мерж — отдельная задача класса SPEC 051 (сначала сабмодули, потом ядро). Релиз несёт
+  снифферы и фикс приёма AWG поверх прежней базы. Сабмодули против `go.mod` сверены
+  (wireguard-go `c6c8a83` ⊂ `lx-awg2-v005`, sing-tun `d677342` ⊂ HEAD, gvisor —
+  снапшот 20260727).
+
 #### v1.14.0-lx.32
 
 Стабильный релиз. Пользовательские ноты (EN+RU):

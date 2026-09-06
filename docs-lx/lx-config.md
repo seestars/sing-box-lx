@@ -266,7 +266,7 @@ A minimal `transport` block is just `"type": "xhttp"` (mode `auto`); the [exampl
 
 ---
 
-## 2. AmneziaWG 2.0 / 3.x (AWG2, AWG3)
+## 2. AmneziaWG 2.0/3.x (AWG2, AWG3)
 
 AWG is WireGuard + DPI-evasion obfuscation. It is configured as a normal sing-box **`wireguard` endpoint** with extra promoted fields. With `with_awg` these are pushed to the device; a config without any AWG field is a plain WireGuard endpoint (byte-identical to upstream behavior).
 
@@ -284,8 +284,8 @@ packet — the core defaults to `1280` when you set `s4` and omit `mtu`.
 > and default, the CPS tag format, the `id`/`ip`/`ib` masquerade sugar (four profiles,
 > which to pick, what reaches the wire), the MTU budget math, the `awg.conf` 1:1 mapping
 > and the verbatim validation errors — is in
-> [lx-protocols-transports.md §2](lx-protocols-transports.md#2-amneziawg-20-awg2)**
-> ([RU](lx-protocols-transports.ru.md#2-amneziawg-20-awg2)).
+> [lx-protocols-transports.md §2](lx-protocols-transports.md#2-amneziawg-203x-awg2-awg3)**
+> ([RU](lx-protocols-transports.ru.md#2-amneziawg-203x-awg2-awg3)).
 
 ### Example — AmneziaWG 3.1 endpoint (Amnezia `amnezia-awg2` export)
 
@@ -347,7 +347,7 @@ the **MTU budget** (why `s4` forces a lower MTU, the `sendmsg: message too long`
 the auto-`1280` default, `udp_fragment` for nested tunnels), and the **`awg.conf` 1:1
 mapping** are all documented in the full reference — see the 📖 link above.
 
-The runtime is backed by `Leadaxe/wireguard-go` (sagernet/wireguard-go + AmneziaWG obfuscation, wired via the `submodules/wireguard-go` submodule) — see the [AWG2 feature](../SPECS/FEATURES/003-AWG2/FEATURE.md).
+The runtime is backed by `Leadaxe/wireguard-go` (sagernet/wireguard-go + AmneziaWG obfuscation, wired via the `submodules/wireguard-go` submodule) — see the [AWG feature](../SPECS/FEATURES/003-AWG/FEATURE.md).
 
 ---
 
