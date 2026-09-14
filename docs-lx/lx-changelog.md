@@ -28,6 +28,127 @@ required for stable tags); this changelog section is the fallback used for pre-r
 > тогда. Пользовательские ноты билингвальны там, где это важно, — в
 > [`releases/`](releases/).
 
+#### v1.14.0-lx.38
+
+Стабильный релиз: Tailscale в Android AAR и хотфикс вложенных selector'ов. Пользовательские ноты (EN+RU):
+[`docs-lx/releases/v1.14.0-lx.38.md`](https://github.com/Leadaxe/sing-box-lx/blob/lx/docs-lx/releases/v1.14.0-lx.38.md).
+
+**Что вошло:**
+
+- 🤖 **Android AAR несёт `with_tailscale` + 11 `ts_omit_*`** (коммит 682ae0426; решение
+  владельца 2026-09-14 по контракту LxBox `## 13`, D-103: LxBox получает tailscale-узлы от
+  лаунчера, поэтому endpoint `tailscale`, DNS-транспорт и сервис `derp` должны быть в
+  рантайме). Правка — только `cmd/internal/build_libbox/main.go`: блок `lx:begin no-tailscale`
+  заменён на `lx:begin tailscale` с апстримным mobile-набором как есть (`with_tailscale` +
+  `ts_omit_logtail/ssh/drive/taildrop/webclient/doctor/capture/kube/aws/synology/bird`);
+  комментарий в `Makefile.lx`. AAR теперь совпадает с desktop `LX_TAGS` по tailscale
+  (там с 2026-09-04, lx.32). Замер на M1 Pro, go1.26.6, NDK r28c: `make lib_android` 11:58
+  с тегом против 12:15 без — разницы нет, tailscale-код и так компилировался через `tailssh`
+  под `with_gvisor`; `libbox.aar` 119 351 122 Б против 116 771 335 (+2,58 МБ, +2,2 %),
+  arm64 `libbox.so` +1,96 МБ, символов `tsnet` 0 → 157, предупреждений сборки нет.
+  LxBox гейтит tailscale-узел по версии ядра ≥ `1.14.0-lx.38` (`kTailscaleMinCoreVersion`).
+  Устаревшие упоминания `lx:no-tailscale` поправлены: `lx-ci.yml`, шаблон нот в
+  `lx-release.yml`, SPEC 004 (SPEC/PLAN/IMPLEMENTATION_REPORT); исторические записи
+  changelog (lx.31, мерж 235) оставлены как есть с пометкой.
+- 🔒 **Вложенные selector'ы: переключение внутреннего глушило весь трафик до рестарта —
+  ABBA-дедлок `interrupt.Group`** ([SPEC 084](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/084-INTERRUPT_GROUP_ABBA_DEADLOCK/SPEC.md),
+  [issue #20](https://github.com/Leadaxe/sing-box-lx/issues/20)). Репортёр (OpenWrt, `lx.35`,
+  `global-auto-out → eu-auto-out → urltest → нода`, DoH с `detour: global-auto-out`) принёс
+  goroutine-дампы с верным диагнозом: 609→981 goroutine, 67 в `sync.Mutex.Lock` внутри
+  `common/interrupt` (47 `NewConn`, 11 `NewSingPacketConn`, 6 `Conn.Close`, 2 `Interrupt`).
+  Корень: `Group.Interrupt` и три Close-обёртки закрывали нижележащее соединение **под**
+  `g.access`; обёртка входящего SPEC 064 v2 (e3ebbbaf9, lx.25) дала вложенным selector'ам
+  второй порядок вложенности — входящее `B(A(raw))`, dial через `detour` `A(B(raw))` —
+  и `Interrupt(B)` (держит B, закрывает `A(raw)`) встречается с `Close` DoH (держит A,
+  ждёт B). Наш регресс: у апстрима inbound-обёртки нет, порядок один, «Close под замком»
+  ему безопасен. Фикс в примитиве (`common/interrupt/group.go`, `conn.go`, маркер
+  `// lx: SPEC 084`): под замком только снятие записи из списка, нижележащий `Close` после
+  `Unlock`; двойной `Close` допустим, как и раньше (`list.Remove` у sing — no-op для снятого
+  элемента). Семантика `isExternal` и состав списка не менялись. Red/green:
+  `common/interrupt/group_lx_test.go` (три обёртки, детерминирующий «затвор» — на старом коде
+  все три подтеста падают по таймауту) и `protocol/group/interrupt_nested_deadlock_lx_test.go`
+  (настоящие `Selector`'ы + `route.ConnectionManager`, сценарий репортёра — на старом коде
+  виснет `SelectOutbound`); `go test -race` по `common/interrupt`, `protocol/group`,
+  `protocol/chain`, компиляция под полным `LX_TAGS`. Обход для старых сборок:
+  `interrupt_exist_connections: false` у внутреннего selector'а (закрывает путь через
+  `Interrupt`, узкое окно «Close против Close» остаётся). Реестр 004-HOTFIXES дополнен,
+  в SPEC 064 — пометка о побочном эффекте v2. Остаток: полевой прогон на конфиге репортёра.
+- База апстрима без изменений: `upstream/stable` b7eb49bb8 (`v1.14.0` + 33), дрейф 0.
+  Desktop/router-бинарники и их набор тегов не меняются.
+
+#### v1.14.0-lx.37
+
+Стабильный релиз, синхронизация с апстримом. Пользовательские ноты (EN+RU):
+[`docs-lx/releases/v1.14.0-lx.37.md`](https://github.com/Leadaxe/sing-box-lx/blob/lx/docs-lx/releases/v1.14.0-lx.37.md).
+
+**Что вошло:**
+
+- ⬆️ **База апстрима: `upstream/stable` b7eb49bb8 (`v1.14.0` + 33, «Fix cronet-go»,
+  2026-09-12)** — мерж de3ac74ff, merge-base a25ad8ce5 (предыдущий мерж 03e309113), 17 коммитов
+  честной истории, 35 файлов. Прямой `git merge` дал 2 конфликта: `transport/wireguard/endpoint.go`
+  (case-метки `onPauseUpdated`) и `go.sum`. Автослияния `protocol/group/selector.go`,
+  `route/route.go`, `daemon/instance.go` сверены построчно — только lx-швы; snap-проверка
+  файлов без lx-авторства чистая; маркеры SPEC 053/083 в `common/tls/reality_client.go` на месте.
+  Тега у апстрима нет → `upstream.version` остаётся 1.14.0.
+- 🔧 **Сабмодули синхронизированы ДО ядра** (раннбук §1):
+  `submodules/wireguard-go` — cherry-pick abd9348 «conn: Reopen the bind when a connected
+  socket stops working on darwin» (= v0.0.6) → 6383749 на `lx-awg2-v005`; конфликт один —
+  апстрим удалил `receiveSingle` в `conn/msgx_darwin.go` вместе с нашей строкой `hasReserved`,
+  гейт живёт в `makeReceiveMsgX`, `git diff v0.0.6` по файлу = одна lx-строка; тесты conn/device
+  (AWG 3.x, SPEC 026/041/069/080/081) зелёные. `submodules/sing-tun` — merge `up/main` be4ce8d
+  (= v0.9.3: netlink overrun в `monitor_linux`, auto-redirect pre-match/L3, bypass verdicts) →
+  6f13ebc без конфликтов и без force-push, норма `git diff up/main HEAD` = `stack_system.go` +
+  selfheal-тест (SPEC 040) держится. `submodules/gvisor` — пин апстрима не менялся.
+- 😴 **WG-эндпоинт: `onPauseUpdated` только на `EventNetworkPause`/`EventNetworkWake`**
+  (апстрим 6364d9a5f «Fix WireGuard endpoint stopping on device sleep»); наш guard `suspended`
+  (SPEC 020/007) и детачед-диспетчер SPEC 071 сохранены. Тесты `endpoint_pause_dispatch_lx_test`
+  шлют device-события как маркеры диспетчера — семантически не задеты.
+- 🔁 **Selector: апстрим 515a73e4e пришёл к форме v1 SPEC 064** (в ветке ConnectionManager
+  передаётся `s`, не `selected`). Обёртка входящего v2 остаётся ради handler-ветки; на ветке B
+  соединение регистрируется дважды (входящее + исходящее), один `Interrupt` закрывает оба
+  узла. Заметка в [SPEC 064 §2.1](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/064-SELECTOR_INTERRUPT_DEAD_ON_INBOUND/SPEC.md);
+  тесты `interrupt_selector_lx_test` зелёные.
+- deps: `sing` v0.9.3, `sing-tun` v0.9.3, `wireguard-go` v0.0.6, `cronet-go` 0d28acc4
+  (`.github/CRONET_GO_VERSION`; musl-зеркало `lx-musl-toolchain-mirror` запущено вручную под
+  новый ключ).
+
+**Проверено:** `go build ./...` (дефолт), `make -f Makefile.lx lx-build` + `lx-check`,
+`go test ./...` без тегов и под полным `LX_TAGS` (`-checklinkname=0`), race-набор lx-ci
+(`./lxd/ ./cmd/sing-box/`), кросс-сборка linux/amd64, linux/arm64, windows/amd64, android/arm64
+(AAR-набор тегов), сборка и тесты обоих сабмодулей под darwin/linux/windows/android.
+Единственный красный — стенд `lx-test/zombie` `TestURLTestZombieDoesNotSurviveRestart`, он
+красный и на cbcc7935f (lx.36) с прежними сабмодулями (воспроизведено в worktree) — не
+регрессия мержа, lx-ci его не гоняет; бисект lx.30…lx.36 — отдельная задача.
+Не гонялось: AAR на реальном устройстве, живой AWG/WG-прогон после смены сабмодулей
+(раннбук §1.4) — остаток на владельце.
+
+#### v1.14.0-lx.36
+
+Стабильный релиз, хотфикс. Пользовательские ноты (EN+RU):
+[`docs-lx/releases/v1.14.0-lx.36.md`](https://github.com/Leadaxe/sing-box-lx/blob/lx/docs-lx/releases/v1.14.0-lx.36.md).
+
+**Что вошло:**
+
+- 🔐 **REALITY против Xray ≥ v26.9.8: узлы молча уходили на камуфляжный сайт
+  (`reality verification failed`)** ([SPEC 083](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/083-REALITY_MLKEM_KEYSHARE/SPEC.md)).
+  `XTLS/REALITY@8cdf7bf` (в Xray-core v26.9.8/v26.9.9) требует key_share `X25519MLKEM768`
+  перед необязательным X25519 и без него проксирует соединение на `dest`. У нас гибрида не
+  было, потому что апстримный `ClientHandshake` сам вырезал его из `SupportedCurves`/`KeyShare`
+  (костыль `dbdcce20a` «Update utls to v1.7.2»); апстрим sing-box сломан так же
+  (SagerNet#4520). Фикс в `common/tls/reality_client.go`: фильтр и второй
+  `BuildHandshakeState` сняты — спека `HelloChrome_133` шлёт `GREASE, X25519MLKEM768, X25519`;
+  `AuthKey` считается по `keyShareKeys.Ecdhe`, при nil — по `MlkemEcdhe` (порядок выбора
+  сервера, как у Xray-клиента и mihomo). Стенд на Mac (loopback, Xray darwin/arm64): до патча
+  против v26.9.9 все отпечатки — `verification failed`; после — `chrome` 204×3; против v26.7.28
+  и v26.7.11 все отпечатки 204 до и после (регрессии нет). Не-Chrome отпечатки гибрида не несут
+  и против нового Xray мертвы by design (паритет с Xray) — подмена на уровне LxBox (§281).
+- ✅ **SPEC 053 (minClientVer 26.3.27) закрыта полевым прогоном** тем же стендом: Xray v26.7.11
+  с незаданным `minClientVer` — 204; контрольная сборка с апстримными `1.8.1` —
+  `hs.c.conn == conn: false`, `reality verification failed`.
+- База апстрима без изменений: `upstream/stable` a25ad8ce5 (`v1.14.0` + 16). Дрейф 17
+  коммитов (`b7eb49bb8`, `common/tls` не трогает) отложен сознательно: хотфикс, мерж — отдельной
+  задачей.
+
 #### v1.14.0-lx.35
 
 Стабильный релиз, хотфикс. Пользовательские ноты (EN+RU):
@@ -211,7 +332,7 @@ required for stable tags); this changelog section is the fallback used for pre-r
   endpoint'а на darwin (tsnet поднимается, уходит на control-plane в login). Цена — только
   размер: ~+13 МБ darwin/arm64 (49.8 → 63.2), ~+16 МБ mips softfloat (56.2 → 72.2).
   Android-AAR тег по-прежнему **не** несёт (`lx:no-tailscale` в `build_libbox`): у LxBox нет
-  UI под tailscale, а это самая тяжёлая зависимость APK. Тег добавлен в `LX_TAGS`
+  UI под tailscale, а это самая тяжёлая зависимость APK *(снято в lx.38 — D-103)*. Тег добавлен в `LX_TAGS`
   (`Makefile.lx`) и `BASE_TAGS` (`lx-ci.yml`); README/SPEC 004 обновлены.
 - 📌 **Дрейф апстрима отложен сознательно:** `upstream/stable` ушёл на 308 коммитов от
   merge-base (замер 2026-09-04; 301 на момент lx.30). Мерж — отдельная задача класса
