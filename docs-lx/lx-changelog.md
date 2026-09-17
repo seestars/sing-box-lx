@@ -28,6 +28,96 @@ required for stable tags); this changelog section is the fallback used for pre-r
 > тогда. Пользовательские ноты билингвальны там, где это важно, — в
 > [`releases/`](releases/).
 
+#### v1.14.1-lx.3
+
+- 🧭 **REALITY `fp=safari` проходит на Xray ≥ v26.9.8**
+  ([SPEC 087](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/087-UTLS_SAFARI_26_3/SPEC.md),
+  продолжение [SPEC 086](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/086-UTLS_FORK_FIREFOX148/SPEC.md)).
+  Тот же приём, что для `firefox`: в форк `submodules/utls` ([Leadaxe/utls-lx](https://github.com/Leadaxe/utls-lx))
+  перенесён третий коммит refraction `aa6edf4` — пресет `HelloSafari_26_3` с `X25519MLKEM768` перед
+  `X25519`; `HelloSafari_Auto` = 26.3 (было Safari 16.0 без гибрида). Cherry-pick без конфликтов,
+  собственных правок библиотеки нет. Структура ClientHello Safari 26.3 совпала с refraction
+  (scratch-сравнение по сырым байтам). Страж `common/tls/utls_firefox148_lx_test.go` расширен:
+  `safari` = Safari 26.3, гибрид перед X25519 по разу у `chrome`/`firefox`/`safari`. Стенд на Mac
+  2026-09-16 (Xray на loopback): v26.9.9 — `fp=safari` 204 ×3 (ядро lx.2 — `reality verification
+  failed` ×3), v26.7.28 и v26.7.11 — 204, `chrome`/`firefox` без регрессии. Решение владельца
+  2026-09-16: `edge`, `ios`, `android`, `360`, `qq` остаются без гибрида — пресетов с ним нет ни у
+  metacubex, ни у refraction (у самого Xray-core та же граница), подмена на уровне приложений
+  (LxBox §281, лаунчер), ядро их не трогает. База апстрима и дрейф — как в lx.2 (`v1.14.1`,
+  `upstream/stable` впереди на те же 5 коммитов, не взяты), Go 1.26.8 без изменений.
+
+#### v1.14.1-lx.2
+
+- 🦊 **REALITY `fp=firefox` снова проходит на Xray ≥ v26.9.8**
+  ([SPEC 086](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/086-UTLS_FORK_FIREFOX148/SPEC.md),
+  продолжение [SPEC 083](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/083-REALITY_MLKEM_KEYSHARE/SPEC.md),
+  issue [#22](https://github.com/Leadaxe/sing-box-lx/issues/22), полевой отчёт
+  [singbox-launcher#124](https://github.com/Leadaxe/singbox-launcher/issues/124)). 083 вернула
+  гибридный key share `X25519MLKEM768` в ClientHello, но в `metacubex/utls` v1.8.7 он есть только у
+  chrome-пресетов: `firefox` там — Firefox 120 без гибрида, и сервер `XTLS/REALITY@8cdf7bf` отсекает
+  его так же тихо (`reality verification failed`). metacubex Firefox 148 не несёт и внешних PR не
+  принимает, апстрим sing-box сидит на той же библиотеке, а на первоисточник
+  `refraction-networking/utls` перейти нельзя — на metacubex-ветке стоят REALITY-сервер и
+  `go:linkname` из `common/badtls`/`common/ktls`. Решение — четвёртый форк-сабмодуль
+  `submodules/utls` = [Leadaxe/utls-lx](https://github.com/Leadaxe/utls-lx): metacubex `v1.8.7` +
+  два cherry-pick из refraction (`fc716b2` — пресет `HelloFirefox_148` и reuse одного X25519-ключа
+  между гибридной и классической записями key share, `ddebe39` — та же механика через
+  байт-маркеры); собственных правок библиотеки нет, единственный конфликт — блок import
+  (`internal/mlkem` metacubex вместо `crypto/mlkem`), путь модуля не менялся, linkname резолвятся
+  (сборка полным `LX_TAGS` и кросс-сборка android/arm64). `replace github.com/metacubex/utls =>
+  ./submodules/utls` в `go.mod`; `"firefox"` по-прежнему смотрит в `HelloFirefox_Auto`, который
+  теперь = 148. Структура ClientHello Firefox 148 совпала с refraction по сырым байтам
+  (scratch-сравнение; единственное отличие — случайный AEAD в ECH GREASE, монета у обеих
+  библиотек). Страж `common/tls/utls_firefox148_lx_test.go`: `firefox` = Firefox 148; у `chrome` и
+  `firefox` `X25519MLKEM768` перед `X25519` по одному разу (это же — проверка 083 §6 на каждом
+  мерже, теперь в CI); X25519-хвост гибрида == отдельная запись `X25519`, `Ecdhe` и `MlkemEcdhe` —
+  один ключ (контракт `AuthKey` 083 под reuse). Стенд на Mac 2026-09-16 (Xray на loopback, как в
+  083): v26.9.9 — `fp=firefox` 204 ×3 (ядро до фикса — `reality verification failed` ×3), v26.7.28
+  и v26.7.11 — 204, `fp=chrome` без регрессии на всех трёх, контроль с dest `www.cloudflare.com` —
+  204. Остальные не-chrome отпечатки (`safari`, `ios`, `edge`, `android`, `360`, `qq`) не
+  трогались — отдельное решение (#22). Сопровождение: дрейф теперь четырёх сабмодулей разбирается
+  до мержа ядра (раннбук §1.1 — сверка тега `metacubex/utls` и двух коммитов поверх); условие
+  снятия — metacubex выпустит тег с Firefox 148 и reuse. Полевой прогон — за владельцем.
+- 🧟 **Отмена dial-контекста прерывает `encryption`-хендшейк VLESS**
+  ([SPEC 050](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/050-URLTEST_ZOMBIE_RUN_SURVIVES_RESTART/SPEC.md) §2,
+  критерий приёмки 2). `ClientInstance.Handshake` заканчивается блокирующим `io.ReadFull`
+  ответа сервера. На узле, который принимает соединение и молчит, этот read не возвращается
+  никогда: у голого TCP-conn нет своего read-дедлайна, а в XHTTP тело ответа позднесвязанное —
+  `Read` паркуется раньше, чем появляется что таймаутить. Вмешаться сверху нечем: conn ещё не
+  отдан наверх, вызывающий всё ещё внутри `DialContext`. Это был последний неограниченный wait
+  в dial-пути: write-сторона получила дедлайн ещё в исходной задаче, а read-сторона осталась ни
+  с чем после того, как SPEC 077 снял сторож уровня транспорта. Фикс — `guardHandshake`
+  (`protocol/vless/lx_encryption.go`): закрытие conn — единственный рычаг, достающий до
+  припаркованного read, поэтому guard владеет conn до возврата хендшейка, а заявка атомарна в
+  обе стороны (`claimed.CompareAndSwap`) — хендшейк, успевший в момент смерти контекста,
+  выигрывает и сохраняет свой conn; сработавший первым guard не отдаёт наверх conn, который лишь
+  выглядит здоровым. Двойного закрытия нет ни на одном пути; при неотменяемом контексте горутина
+  не запускается. Это **не** возврат dial-context watchdog, снятого SPEC 077: тот жил внутри
+  транспорта и продолжал слушать после возврата `DialContext`, ломая пулящих потребителей (пул
+  DNS отменяет dial-контекст сразу по возврату диала — контракт `net.Dialer`); этот guard
+  останавливается до выхода из `wrapEncryption`, контракт SPEC 077 §2 держится. Red/green:
+  `protocol/vless/lx_encryption_guard_test.go` — отмена ctx прерывает хендшейк и закрывает conn,
+  guard не переживает хендшейк (граница SPEC 077 §2), при неотменяемом контексте горутина не
+  стартует; инстанс `encryption` в тестах настоящий, инициализированный `Init` реальным
+  X25519-ключом (у пустого `ClientInstance` `Handshake` возвращает `uninitialized` немедленно,
+  до блокирующего чтения дело не доходит, и тест проходил бы по ложной причине); проверено
+  откатом guard'а, `-race` чист, утечки горутин нет на 200 прогонах с живым контекстом.
+  **Побочно закрыт стенд `lx-test/zombie`**: `TestURLTestZombieDoesNotSurviveRestart` был
+  красным на `lx.36` и на выпущенном `v1.14.0-lx.39` (проверено прогоном на самом теге) —
+  теперь зелёный, весь `go test ./...` под `LX_TAGS` без падений. Остаток SPEC 050 прежний:
+  живой XHTTP-узел и device-верификация по `dumpStacks()` (критерии 3–5).
+- 📌 **База апстрима и дрейф.** База без изменений — `v1.14.1` (`9dddbefb2` + 2), мержей
+  апстрима в этот тег не было. На момент среза `upstream/stable` впереди на 5 коммитов:
+  `10e9f86bc` Fix systemd daemon reload after package installation, `c3074cc48` Fix TestFlight
+  publish being skipped on stable, `b6e8d9845` Add App Store review submission command,
+  `dbe8c0833` Fix TestFlight publish picking builds of other versions, `103f3af14` Bind network
+  reset dispatch to manager lifecycle (`route/network.go`). В хотфикс-релиз намеренно не взяты —
+  приедут следующим синком. Go-тулчейн `1.26.8` без изменений (`go.version`). Форк-сабмодулей
+  теперь четыре: `wireguard-go`, `sing-tun`, `gvisor` и новый
+  [`utls`](https://github.com/Leadaxe/utls-lx) — сборка из исходников требует
+  `git clone --recurse-submodules`, дрейф всех четырёх разбирается до мержа ядра
+  ([раннбук §1](https://github.com/Leadaxe/sing-box-lx/blob/lx/docs-lx/lx-release-runbook.ru.md)).
+
 #### v1.14.1-lx.1
 
 Стабильный релиз: перевод форка на новую базу апстрима **sing-box `v1.14.1`** плюс бамп
