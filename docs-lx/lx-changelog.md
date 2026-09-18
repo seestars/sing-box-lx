@@ -28,6 +28,153 @@ required for stable tags); this changelog section is the fallback used for pre-r
 > тогда. Пользовательские ноты билингвальны там, где это важно, — в
 > [`releases/`](releases/).
 
+#### v1.14.1-lx.7
+
+- 🏷️ **Ошибка конфигурации называет элемент: тип и тег, а не только индекс**
+  ([SPEC 092](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/092-INIT_ERROR_NAMES_TAG/SPEC.md)).
+  Было: `initialize outbound[0]: invalid short_id`. Стало:
+  `initialize outbound[0] vless[proxy-de-1]: invalid short_id`. Отказ `box.New` на конфиге называл
+  элемент только порядковым номером, а приложения-потребители (LxBox §455, лаунчер, `lxd apply`)
+  показывают текст ядра дословно — у пользователя в подписке сотня узлов с тегами, а не с номерами,
+  и по индексу он не находит, какой именно узел чинить. При этом тип и тег в каждом цикле
+  инициализации **уже вычислены** строкой выше, для имени логгера (`outbound/vless[proxy-de-1]`), —
+  ошибка просто их не использовала. Новый хвост ` <type>[<tag>]` повторяет ровно эту форму, чтобы
+  текст ошибки и строка лога читались как одно и то же имя. Правка в `box.go`, маркер
+  `// lx: SPEC 092`, шесть индексированных циклов: DNS server, endpoint, inbound, service, outbound,
+  certificate provider. Границы: апстримный префикс `initialize <kind>[<i>]` сохранён **дословно**
+  (на него могут матчить существующие парсеры) — новое только между `]` и двоеточием; без явного
+  тега хвост даёт `vless[0]`, тип всё равно полезен; слово «kind» апстримное, включая регистр
+  (`DNS server`, `certificate provider`). Ошибки **внутри** конструкторов (`invalid short_id`,
+  `unknown udp_relay_mode: …`) не менялись — тег добавляет обёртка в `box.New`, а не каждый
+  протокол; формат логгеров, Clash API, gRPC/lxd и libbox-сигнатуры не тронуты. Страж
+  `lx-test/initerr/init_error_names_tag_lx_test.go` (`with_utls`): три кейса — outbound `vless`
+  с тегом → `initialize outbound[0] vless[proxy-de-1]: `, он же без тега → `outbound[0] vless[0]`,
+  inbound `mixed` с `tls.enabled` без сертификата → `initialize inbound[0] mixed[in-local]: `;
+  red-check пройден — до фикса все три давали голый индекс. Код апстримный; реестр
+  [HOTFIXES](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/FEATURES/004-HOTFIXES/FEATURE.md)
+  дополнен: условие снятия — апстрим включит тип/тег в текст сам, файл апстримный и несёт швы других
+  SPEC, маркер проверять на каждом мерже.
+- 📎 **Кто попросил.** LxBox, 2026-09-18, после приёма пина `v1.14.1-lx.5`: экран ошибки конфигурации
+  показывает строку ядра как есть, и на подписке из сотни узлов индекс не помогает найти виновника.
+  Разбор текста на стороне приложения при этом не нужен — хвост добавлен так, что старый префикс
+  остался на месте.
+- 📌 **Не меняются:** конфигурация (новых ключей нет), провод любых протоколов, дефолты, формат
+  логгеров, Clash API, gRPC/lxd и libbox-сигнатуры, наборы тегов desktop/router/AAR, Go-тулчейн
+  1.26.8, четыре сабмодуля. База апстрима `v1.14.1` без изменений; известный дрейф `upstream/stable` —
+  **10** коммитов (с бампом `wireguard-go` v0.0.7) — по-прежнему намеренно отложен на отдельный синк,
+  см. ноты lx.4.
+
+#### v1.14.1-lx.6
+
+- 🧹 **`tuic.udp_relay_mode`: опечатка теперь ошибка конфигурации, а не тихий `native`**
+  ([SPEC 091](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/091-CONFIG_VALIDATION_TUIC_MASQUE/SPEC.md) §1).
+  Было: в апстримном `switch` по `options.UDPRelayMode` нет ветки `default`, поэтому `"qiuc"`, `"Native"`,
+  `"udp"` и любое другое значение молча означали `native` — пользователь, написавший `quic` с опечаткой,
+  получал не тот режим UDP-релея и никакого сигнала об этом. Соседняя опция `congestion_control` при
+  опечатке даёт честную ошибку `unknown congestion control algorithm: <value>` (из `sing-quic`), то есть
+  поведение расходилось внутри одного outbound'а; документация апстрима знает ровно два значения —
+  `native` и `quic`. Стало: `unknown udp_relay_mode: <value> (expected native or quic)` при загрузке
+  конфига. Правка в `protocol/tuic/outbound.go`, маркер `// lx: SPEC 091`. Границы не меняются: пустая
+  строка по-прежнему = `native` (документированный дефолт), а проверка конфликта `udp_over_stream` +
+  `udp_relay_mode` осталась **выше** новой ветки — конфликт двух заданных опций важнее опечатки в одной.
+  Стражи `TestLxTUICUnknownUDPRelayModeRejected`, `TestLxTUICKnownUDPRelayModesAccepted`,
+  `TestLxTUICUDPOverStreamConflictStillWinsOverTypo` в `protocol/tuic/udp_relay_mode_lx_test.go`, red-check
+  пройден — до фикса `"qiuc"` конструировал outbound без единой ошибки. Код апстримный, `switch` без
+  `default` там с появления tuic-outbound'а; реестр
+  [HOTFIXES](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/FEATURES/004-HOTFIXES/FEATURE.md)
+  дополнен: условие снятия — апстрим добавит `default` (или валидацию в `option`), файл апстримный,
+  маркер проверять на каждом мерже.
+- 🧹 **`masque`, `profile: "standard"` без `uri`: один текст ошибки вместо двух разных**
+  ([SPEC 091](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/091-CONFIG_VALIDATION_TUIC_MASQUE/SPEC.md) §2).
+  Было: `resolveVHTTP` вызывался **раньше** проверки `uri`, поэтому забывший `uri` видел разное в
+  зависимости от `vhttp`: при `h2` — `masque: vhttp h2 is not implemented for the standard profile`
+  (честно, но не про то — уводило чинить `vhttp`, после чего человек упирался во вторую ошибку), при
+  `h3`/`auto`/не задано — `masque: uri is required for the standard profile`, которая не говорила, **что**
+  туда писать. Стало: проверка `uri` поднята сразу за `resolveLegacyOptions` (legacy-поля могут его
+  заполнять — поэтому не выше), и её текст самодостаточен:
+  `masque: uri is required for the standard profile — set it to the server's CONNECT-IP request URI, e.g. https://<host>/.well-known/masque/ip/*/*/`.
+  Значение уходит в запрос Extended CONNECT как есть — ядро в нём ничего не подставляет, поэтому в тексте
+  форма полного туннеля RFC 9484 со звёздочками, а не выдуманные плейсхолдеры. Ошибка про h2 на `standard`
+  осталась прежней, но теперь до неё доходят только конфиги, у которых `uri` есть. Профиль `cloudflare`
+  (`uri` по умолчанию из профиля) не тронут. Правка в форк-нативном `protocol/masque/outbound.go`, маркер
+  `// lx: SPEC 091`; стражи `TestLxMASQUEStandardWithoutURIIsOneError`,
+  `TestLxMASQUEStandardH2StillRejectedWhenURIIsSet`, `TestLxMASQUECloudflareNeedsNoURI` в
+  `protocol/masque/standard_uri_lx_test.go`, red-check пройден — до фикса `vhttp: h2` без `uri` давал
+  ошибку про h2. Фраза про обязательность `uri` на `standard` добавлена в `docs-lx/lx-config.md` §4 и
+  русскую пару.
+- 📎 **Кто нашёл.** Обе заявки — от DRIFT-инвентаря контракта лаунчера (DRIFT 131 §8.3), 2026-09-18: ядро
+  молча или невнятно реагировало на неверный конфиг. В лаунчере и LxBox свои гарды на оба поля остаются —
+  UX-защита до текста ядра.
+- 📌 **Не меняются:** конфигурация (новых ключей нет), провод tuic и masque, дефолты (`udp_relay_mode: ""`
+  = `native`, `masque.uri` по профилю), наборы тегов desktop/router/AAR, Go-тулчейн 1.26.8, четыре
+  сабмодуля. База апстрима `v1.14.1` без изменений; известный дрейф `upstream/stable` — **10** коммитов
+  (с бампом `wireguard-go` v0.0.7) — по-прежнему намеренно отложен на отдельный синк, см. ноты lx.4.
+
+#### v1.14.1-lx.5
+
+- 💥 **REALITY `short_id` длиннее 16 hex-символов больше не роняет процесс**
+  ([SPEC 090](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/090-REALITY_SHORT_ID_OVERFLOW_PANIC/SPEC.md)).
+  Было: вместо ошибки конфигурации — паника `index out of range [8] with length 8`. `sing-box check`
+  падал без внятного сообщения, `run` / libbox `Start` / `lxd apply` убивали **весь** процесс (не
+  «узел с ошибкой», а мёртвый VPN), inbound `vless` + `tls.reality` на сервере/роутере — при старте.
+  Причина: `encoding/hex.Decode` пишет `len(src)/2` байт в `dst`, не сверяясь с его ёмкостью, поэтому
+  при `len(short_id) > 16` запись выходит за границы `[8]byte` **внутри** самого `hex.Decode`;
+  стоящая следом апстримная проверка `decodedLen > 8` мёртвая — управление до неё не доходит.
+  Стало: `len(short_id) > 16` отвергается **до** декодирования, с апстримным текстом `invalid short_id`
+  (на сервере — `invalid short_id[<i>]: <value>`, как у соседней ошибки); проверка после декодирования
+  снята как мёртвая. Правка в обеих точках — `common/tls/reality_client.go` и
+  `common/tls/reality_server.go`, маркер `// lx: SPEC 090`. Легальные значения не меняются: пустая
+  строка = нулевой short_id, 1…16 hex; нечётная длина (`"abc"`) и не-hex (`"zz"`) по-прежнему дают
+  `decode short_id`, как раньше. Стражи `TestLxRealityShortIDTooLongRejected` и
+  `TestLxRealityServerShortIDTooLongRejected` в `common/tls/reality_client_lx_test.go` (`with_utls`),
+  red-check пройден на обеих сторонах — до фикса оба роняли процесс тестов паникой в `hex.Decode`.
+  Код апстримный, ровесник REALITY (2023-02/03), в текущем `upstream/stable` дословно тот же; наших
+  правок в этом месте не было. Найдено DRIFT-инвентарём контракта LxBox/лаунчера на пине
+  `v1.14.1-lx.4`; приложения (LxBox §343, лаунчер) такое значение отбрасывают у себя, поэтому их
+  пользователей не било — било голое ядро с рукописным конфигом, подписки с мусорным `sid=` при
+  отключённом клиентском гарде и серверные конфиги. Реестр
+  [HOTFIXES](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/FEATURES/004-HOTFIXES/FEATURE.md)
+  дополнен: условие снятия — апстрим добавит проверку длины до `hex.Decode`; файлы апстримные,
+  маркер проверять на каждом мерже.
+- 📌 **Не меняются:** конфигурация, провод, наборы тегов desktop/router/AAR, Go-тулчейн 1.26.8,
+  четыре сабмодуля. База апстрима `v1.14.1` без изменений; известный дрейф `upstream/stable` —
+  **10** коммитов (с бампом `wireguard-go` v0.0.7) — по-прежнему намеренно отложен на отдельный
+  синк, см. ноты lx.4.
+
+#### v1.14.1-lx.4
+
+- ✂️ **REALITY-узлы больше не игнорируют `fragment` / `record_fragment`**
+  ([SPEC 088](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/088-REALITY_FRAGMENT_BYPASS/SPEC.md)).
+  Апстримный `RealityClientConfig.ClientHandshake` строит `utls.UClient` на голом соединении, минуя
+  обёртку `tlsfragment`, которую получают STD- и uTLS-клиенты: опции принимались конфигом и молча не
+  действовали, а дефолт [SPEC 060](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/060-TLS_FRAGMENT_AUTO_ON_DETOUR/SPEC.md)
+  (`record_fragment` под `detour`) до REALITY не доходил. Теперь uTLS- и REALITY-клиент берут обёртку из
+  одного helper'а `wrapClientConn`. Новых ключей нет. Стражи в `common/tls/reality_client_lx_test.go`
+  (тип `NetConn()` по матрице флагов; по проводу: без флагов одна TLS-запись, с `record_fragment` — две),
+  red-check пройден. Поможет ли фрагментация на сети, где теряется длинный ClientHello, — решает сеть;
+  полевой прогон у репортёра LxBox #142 впереди.
+- 🔑 **`tls.reality.key_share`: `hybrid` / `classical`**
+  ([SPEC 089](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/089-REALITY_KEY_SHARE_OPTION/SPEC.md),
+  противовес [SPEC 083](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/083-REALITY_MLKEM_KEYSHARE/SPEC.md)).
+  По-узловой выбор, нести ли в REALITY ClientHello гибридный key share `X25519MLKEM768`. Повод —
+  LxBox #142: на одном мобильном операторе гибридное приветствие `chrome` (1720 байт, два TCP-сегмента)
+  теряется, апстримное (594 байта, один сегмент) проходит; у Xray-клиента тот же симптом (XTLS#6256).
+  `""` — как несёт отпечаток (поведение 083 без изменений); `classical` — `X25519MLKEM768` вырезается из
+  `supported_groups` и `key_share`, как делал апстрим до 083 (**только Xray < v26.9.8**, новые серверы
+  такого клиента отвергают); `hybrid` — гибрид обязателен, на отпечатке без него (`edge`, `ios`, …)
+  явная ошибка вместо тихого `reality verification failed`. Опечатка в значении отвергается при
+  построении outbound'а. Контракт `AuthKey` 083 не тронут. Остаток — проводка в LxBox/лаунчер.
+- 📌 **База и дрейф.** База upstream/stable без изменений — `9dddbefb2` = v1.14.1+2. Дрейф на момент
+  среза: `upstream/stable` впереди на **10** коммитов — 5 отложенных ещё в lx.2/lx.3 (`103f3af14`
+  network reset dispatch, TestFlight/App Store ×3, systemd reload) и 5 новых (`00004faf9` API dashboard
+  default HTTP client, `930d04e8b` docs min_version, `96454e260` initial WireGuard handshake for domain
+  peers, `55d370e5d` command client cancellation, `42ec517d5` implicit default DNS/outbound initialize
+  stage) с бампом `wireguard-go` v0.0.6 → v0.0.7 и `asc-go`. WireGuard-часть требует сначала перевести
+  форк-сабмодуль `submodules/wireguard-go` на v0.0.7 (раннбук §1), поэтому весь набор **сознательно
+  отложен** на отдельный синк. Версии зависимостей (§2a) сверены: Go 1.26.8 = stable, `go.mod` `go 1.25.5`,
+  cronet, JDK 17, protoc, `upstream.version` 1.14.1 совпадают; NDK r28c и мажоры actions — наши пины
+  с `lx:`-причиной; расхождение `require` — только упомянутые два модуля из недомерженного апстрима.
+
 #### v1.14.1-lx.3
 
 - 🧭 **REALITY `fp=safari` проходит на Xray ≥ v26.9.8**

@@ -1,13 +1,13 @@
 # SPEC: 086 — UTLS_FORK_FIREFOX148
 
-**Фича:** [HOTFIXES](../../FEATURES/004-HOTFIXES/FEATURE.md)
+**Фича:** [REALITY](../../FEATURES/017-REALITY/FEATURE.md) · хотфикс в [HOTFIXES](../../FEATURES/004-HOTFIXES/FEATURE.md)
 
 | Поле | Значение |
 |------|----------|
 | Тип | B (bug) — граница фикса [083](../083-REALITY_MLKEM_KEYSHARE/SPEC.md): REALITY с `fp=firefox` не проходит на Xray ≥ v26.9.8, потому что в `metacubex/utls` нет пресета Firefox с гибридным key share |
-| Статус | C (complete) — все пять критериев закрыты 2026-09-16 (dry run релизной матрицы: оба AAR зелёные; полевой прогон на узле репортёра singbox-launcher#124 через лаунчер — `fp=firefox` 204 на Xray ≥ 26.9.8, на v1.14.1-lx.1 тот же узел падал; выпущено в v1.14.1-lx.2). Остаток — AAR на AVD/устройстве (LxBox после бампа пина) и снятие предупреждения §281 для `firefox` версией контракта D-119 синхронно с лаунчером. Реализовано 2026-09-16: форк [Leadaxe/utls-lx](https://github.com/Leadaxe/utls-lx) (`v1.8.7` + `fc716b2` + `ddebe39`, единственный конфликт — блок import), сабмодуль + `replace`, страж-тесты в `common/tls`. Критерии 1, 3, 4, 5 закрыты стендом на Mac (Xray v26.9.9: `fp=firefox` 204, ядро до фикса — `reality verification failed`; v26.7.28/v26.7.11 и `chrome` без регрессии); критерий 2 — локально (сборка полным `LX_TAGS`, `go test ./...`, кросс-сборка android/arm64 с linkname), оба AAR — CI после push суперпроекта. Push и полевой прогон — за владельцем (стоп-точки в «Передаче реализации») |
+| Статус | C (complete) — все пять критериев закрыты 2026-09-16 (dry run релизной матрицы: оба AAR зелёные; полевой прогон на узле репортёра singbox-launcher#124 через лаунчер — `fp=firefox` 204 на Xray ≥ 26.9.8, на v1.14.1-lx.1 тот же узел падал; выпущено в v1.14.1-lx.2). LxBox подхватил в v2.24.1 (2026-09-16, пин `v1.14.1-lx.3`): Java-поверхность AAR та же, что у lx.39, предупреждение `reality_fp_not_chrome` снято для `firefox` и `safari` контрактом, синхронизированным с лаунчером. Остаток — прогон AAR на AVD/устройстве против стенда Xray — за владельцем. Реализовано 2026-09-16: форк [Leadaxe/utls-lx](https://github.com/Leadaxe/utls-lx) (`v1.8.7` + `fc716b2` + `ddebe39`, единственный конфликт — блок import), сабмодуль + `replace`, страж-тесты в `common/tls`. Критерии 1, 3, 4, 5 закрыты стендом на Mac (Xray v26.9.9: `fp=firefox` 204, ядро до фикса — `reality verification failed`; v26.7.28/v26.7.11 и `chrome` без регрессии); критерий 2 — локально (сборка полным `LX_TAGS`, `go test ./...`, кросс-сборка android/arm64 с linkname), оба AAR — CI после push суперпроекта. Push и полевой прогон — за владельцем (стоп-точки в «Передаче реализации») |
 | Ветка | `lx` |
-| Связанные | предшествующая [083](../083-REALITY_MLKEM_KEYSHARE/SPEC.md) (§5a — почему без форка не обойтись); issue [#22](https://github.com/Leadaxe/sing-box-lx/issues/22); полевой отчёт [singbox-launcher#124](https://github.com/Leadaxe/singbox-launcher/issues/124); прецедент форк-сабмодуля — [048](../048-GVISOR_HANDSHAKE_NIL_CRASH/SPEC.md) |
+| Связанные | предшествующая [083](../083-REALITY_MLKEM_KEYSHARE/SPEC.md) (§5a — почему без форка не обойтись); продолжение [087](../087-UTLS_SAFARI_26_3/SPEC.md) (`safari` тем же приёмом); issue [#22](https://github.com/Leadaxe/sing-box-lx/issues/22); полевой отчёт [singbox-launcher#124](https://github.com/Leadaxe/singbox-launcher/issues/124); прецедент форк-сабмодуля — [048](../048-GVISOR_HANDSHAKE_NIL_CRASH/SPEC.md) |
 
 **Touches:** `go.mod` (`replace`, блок `lx:begin utls-firefox148`) + `go.sum` (сняты строки заменённого модуля), `.gitmodules` (`submodules/utls`), `common/tls/utls_client.go` (маппинг `"firefox"` не менялся — проверен тестом), новый `common/tls/utls_firefox148_lx_test.go` (страж), реестр HOTFIXES, `SPECS/README.md`, `README.md`/`README.ru.md` (таблица сабмодулей), `docs-lx/lx-release-runbook.{ru.,}md` §1.1/§3 (четвёртый сабмодуль), `SPECS/CONSTITUTION.md`, `SPECS/IMPLEMENTATION_PROMPT.md`, `docs-lx/lx-changelog.md`.
 
@@ -43,7 +43,7 @@
 
 ## Границы
 
-- Только Firefox 148. Остальные имена (`safari`, `ios`, `android`, `edge`, `360`, `qq`, `random`) — отдельное решение (#22, план п.3).
+- Только Firefox 148. Остальные имена (`safari`, `ios`, `android`, `edge`, `360`, `qq`, `random`) — отдельное решение (#22, план п.3) → решено 2026-09-16: `safari` — [087](../087-UTLS_SAFARI_26_3/SPEC.md) (тот же форк, третий cherry-pick); `edge`/`ios`/`android`/`360`/`qq` по решению владельца остаются как есть — пресетов с гибридом для них нет ни у metacubex, ни у refraction (у Xray-core та же граница), подмена на уровне приложений.
 - В форке — только эти два коммита, собственных lx-правок библиотеки нет.
 - Серверная сторона REALITY (`RealityServer` в форке) не трогается; SagerNet/sing-box#4290 не чиним.
 - Ядро по-прежнему не подменяет отпечаток ([083 §5](../083-REALITY_MLKEM_KEYSHARE/SPEC.md#5-границы)).
@@ -167,7 +167,7 @@
 
 ### Полевой прогон (лаунчер, 2026-09-16)
 
-Агент singbox-launcher собрал ядро из `lx` (`submodules/utls` = `6b7f051`, `LX_VERSION=1.14.1-lx.2-local`, штатный `LX_TAGS`) и прогнал реальный узел репортёра [singbox-launcher#124](https://github.com/Leadaxe/singbox-launcher/issues/124) (`ger10.nekosocks.com:443`, vless+reality+vision, `fp` из подписки): на релизном `1.14.1-lx.1` — `firefox` → `reality verification failed`, `chrome` → 204; на `lx.2-local` — `firefox` 204 ×3 и `api.ipify.org` 200, `chrome` 204 ×3, в логе ни одного `reality verification failed` ([комментарий в #124](https://github.com/Leadaxe/singbox-launcher/issues/124#issuecomment-5696611981)). Мобильная сторона: LxBox бампит пин после тега и проверяет AAR на AVD против стенда; предупреждение §281 для `firefox` снимается не односторонне, а версией контракта D-119 (`contract/README.md`, `warnings.json`, корпус-кейс `reality_fp_firefox_kept`) синхронно с лаунчером, с пометкой «с v1.14.1-lx.2» — на апстримном `metacubex/utls` имя `firefox` гибрида по-прежнему не несёт.
+Агент singbox-launcher собрал ядро из `lx` (`submodules/utls` = `6b7f051`, `LX_VERSION=1.14.1-lx.2-local`, штатный `LX_TAGS`) и прогнал реальный узел репортёра [singbox-launcher#124](https://github.com/Leadaxe/singbox-launcher/issues/124) (`ger10.nekosocks.com:443`, vless+reality+vision, `fp` из подписки): на релизном `1.14.1-lx.1` — `firefox` → `reality verification failed`, `chrome` → 204; на `lx.2-local` — `firefox` 204 ×3 и `api.ipify.org` 200, `chrome` 204 ×3, в логе ни одного `reality verification failed` ([комментарий в #124](https://github.com/Leadaxe/singbox-launcher/issues/124#issuecomment-5696611981)). Мобильная сторона — LxBox v2.24.1 (2026-09-16) на пине `v1.14.1-lx.3`: AAR получен `scripts/fetch-libbox.sh` (SHA256 сошёлся), javap-diff `PlatformInterface`/`CommandClient`/`Libbox` против lx.39 пуст, версия в `libbox.so` — `1.14.1-lx.3`. Предупреждение §281 (`reality_fp_not_chrome`) снято не односторонне, а контрактом, синхронизированным с лаунчером (корпус LxBox проходит без локальных отступлений): без предупреждения — набор `kRealityHybridFingerprints` = семейство chrome + `firefox` + `safari`; `edge`/`ios`/`android`/`360`/`qq` остаются под предупреждением ([087, «Границы»](../087-UTLS_SAFARI_26_3/SPEC.md#границы)); D-119 — явный отпечаток из подписки уходит в конфиг как есть — не менялся. Набор нормативен только для ядра ≥ lx.3: на апстримном `metacubex/utls` у `firefox` и `safari` гибрида нет. Прогон AAR на AVD против стенда Xray не делался — за владельцем.
 
 ### Критерии 4 и 5 — стенд (Mac, 2026-09-16)
 
@@ -210,9 +210,11 @@ http://www.gstatic.com/generate_204` ×3 на отпечаток. Пробник
 ## Цена сопровождения
 
 - Четвёртый форк-сабмодуль: дрейф сабмодулей разбирается **до** мержа ядра ([раннбук §1](../../../docs-lx/lx-release-runbook.ru.md)), иначе ядро зелёное, а AAR сломан.
-- Бамп `metacubex/utls` в апстриме sing-box → ветка `lx` форка переезжает на новый тег metacubex с сохранением двух коммитов.
+- Бамп `metacubex/utls` в апстриме sing-box → ветка `lx` форка переезжает на новый тег metacubex с сохранением перенесённых коммитов — с [087](../087-UTLS_SAFARI_26_3/SPEC.md) их три (`fc716b2`, `ddebe39`, `aa6edf4`).
 - metacubex внешние PR не принимает — синк только своими силами.
 
 ## Условие снятия
 
-metacubex выпустит тег с Firefox 148 и reuse, либо апстрим sing-box переедет на библиотеку, где он есть → убрать `replace` и сабмодуль; `"firefox"` уже смотрит в `HelloFirefox_Auto`.
+metacubex выпустит тег с Firefox 148 и reuse, либо апстрим sing-box переедет на библиотеку, где он есть → убрать `replace` и сабмодуль; `"firefox"` уже смотрит в `HelloFirefox_Auto`. ⚠️ С [087](../087-UTLS_SAFARI_26_3/SPEC.md) форк несёт три коммита: снимать его можно только когда в библиотеке есть и Safari 26.3, иначе снятие вернёт баг `fp=safari`.
+
+⚠️ Снятие касается и приложений. С LxBox v2.24.1 `firefox` и `safari` не получают предупреждение `reality_fp_not_chrome` (набор `kRealityHybridFingerprints`, нормативен для ядра ≥ lx.3; контракт общий с лаунчером). Любая правка ядра, после которой эти имена теряют гибридный key share, — снятие форка раньше, чем гибрид появится в библиотеке, откат перенесённых коммитов, — требует в той же поставке сузить набор в LxBox и в контракте лаунчера.
