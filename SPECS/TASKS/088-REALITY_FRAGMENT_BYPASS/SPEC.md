@@ -5,7 +5,7 @@
 | Поле | Значение |
 |------|----------|
 | Тип | B (bug) — апстримный: `RealityClientConfig.ClientHandshake` строит `utls.UClient` на голом соединении, минуя обёртку `tlsfragment`, которую получают STD- и uTLS-клиенты; `fragment` / `record_fragment` на REALITY-узлах пишутся в конфиг и молча не действуют |
-| Статус | I (implemented) — код, стражи и сборка в дереве 2026-09-17; выпущено в `v1.14.1-lx.4`; полевого прогона на сети, где теряется гибридный ClientHello, не было (см. «Остаток») |
+| Статус | D (done, device-verified) — выпущено в `v1.14.1-lx.4`; полевой прогон репортёра LxBox #142 2026-09-18 (Android, мобильная сеть, серверные pcap): с `record_fragment` на сервер приходит целая TLS-запись 131 байт + начало следующей, с `fragment` — первые сегменты 133/164 байт; REALITY-рукопожатие проходит во всех режимах. ⚠️ Лечит ли фрагментация исходную жалобу — не доказано: причина зависаний оказалась состоянием сети, не формой ClientHello |
 | Ветка | `lx` |
 | Связанные | [060](../060-TLS_FRAGMENT_AUTO_ON_DETOUR/SPEC.md) — авто-`record_fragment` под `detour`, чей дефолт до 088 до REALITY не доходил; [083](../083-REALITY_MLKEM_KEYSHARE/SPEC.md) — гибридный key share, из-за которого ClientHello вырос до двух TCP-сегментов; [089](../089-REALITY_KEY_SHARE_OPTION/SPEC.md) — вторая половина ответа на ту же жалобу (`reality.key_share`); LxBox [#142](https://github.com/Leadaxe/LxBox/issues/142) (репортёр нашёл обход сам, по коду) |
 
@@ -22,7 +22,7 @@ uConn := utls.UClient(conn, uConfig, e.uClient.id)   // reality_client.go, до 
 Поля `fragment` / `recordFragment` / `fragmentFallbackDelay` при этом лежат в `e.uClient` — заполнены из конфига и никем не прочитаны. Следствия:
 
 1. **Явные `"fragment": true` / `"record_fragment": true` на REALITY-узле не работают.** Конфиг принимается, ошибки нет, ClientHello уходит одной записью. Репортёр #142 проверил обе опции на живой сети и увидел в коде, почему они пусты.
-2. **Дефолт [060](../060-TLS_FRAGMENT_AUTO_ON_DETOUR/SPEC.md) до REALITY не доходил.** `applyDetourFragmentDefault` честно ставит `RecordFragment = true` до диспетчеризации по движкам (и в 060 записано «STD, uTLS и REALITY получают одинаковый дефолт»), но REALITY-путь флаг не применяет. То есть REALITY-узел за `detour` — самый частый случай «VLESS через плечо» — оставался с целым ClientHello, и порог «1488 проходит, 1502 исчезает» из 060 к нему применим в полный рост.
+2. **Дефолт [060](../060-TLS_FRAGMENT_AUTO_ON_DETOUR/SPEC.md) до REALITY не доходил.** `applyDetourFragmentDefault` ставит `RecordFragment = true` до диспетчеризации по движкам (и в 060 записано «STD, uTLS и REALITY получают одинаковый дефолт»), но REALITY-путь флаг не применяет. То есть REALITY-узел за `detour` — самый частый случай «VLESS через плечо» — оставался с целым ClientHello, и порог «1488 проходит, 1502 исчезает» из 060 к нему применим в полный рост.
 3. **После [083](../083-REALITY_MLKEM_KEYSHARE/SPEC.md) это стало заметнее.** Гибридный key share `X25519MLKEM768` добавляет 1216 байт: ClientHello `chrome` = 1720 байт, `firefox` = 1885, `safari` = 1533 (замер в тесте, без record-заголовка) — всегда два TCP-сегмента при MSS 1448. До 083 (и у апстрима сегодня) он был 594 байта и умещался в один.
 
 `spoof` REALITY-путь не касается: он отвергается ещё в `newRealityClient` («spoof is unsupported in reality»), поэтому единственное, что теряется, — фрагментация.

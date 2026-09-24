@@ -28,6 +28,32 @@ required for stable tags); this changelog section is the fallback used for pre-r
 > тогда. Пользовательские ноты билингвальны там, где это важно, — в
 > [`releases/`](releases/).
 
+#### v1.14.1-lx.9
+
+- 🧯 **XHTTP: наш же `Close()` больше не считается сбоем — ни для брейкера xmux, ни для лога**
+  ([SPEC 094](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/094-XHTTP_LOCAL_CLOSE_NOT_FAILURE/SPEC.md),
+  [LxBox#148](https://github.com/Leadaxe/LxBox/issues/148)). Симптом: XHTTP-узлы под urltest в
+  selector'е с `interrupt_exist_connections: true` циклически вытеснялись (`xmux: evicted connection
+  (cause=failing)`), а каждое нормально завершённое соединение писало
+  `connection download closed: http2: response body closed` на ERROR — при том, что WS на том же
+  сервере в логе чист. Два дефекта, оба в `transport/v2rayxhttp`: (1) `xmuxClient.roundTrip` отмечал
+  сбой на любую ошибку, включая `context.Canceled` от conn-scoped `cancel()` нашего `Close()`
+  (SPEC 077); три отмены подряд при смене выбора группы — и здоровое пуловое соединение уходило в
+  `failing` с backoff'ом на новое (SPEC 076). Теперь `errors.Is(err, context.Canceled)` нейтрален:
+  контекст отменяем только мы или вызывающий; `DeadlineExceeded`, `ECONNRESET`, `StreamError`,
+  не-200 — по-прежнему сбои. (2) Наш `Body.Close()` будил заблокированный `Read` sentinel'ом x/net,
+  которого `E.IsClosedOrCanceled` из sing не знает; под гейтом `localClosed` (SPEC 076) `Read` теперь
+  отдаёт `net.ErrClosed`, а если тело закрыл истёкший read-deadline — `os.ErrDeadlineExceeded`;
+  `io.EOF` не подменяется. Правка на границе conn по образцу SPEC 082, `route/conn.go` не тронут,
+  закрывает и `dl=h1`/`dl=h3`. Стражи `TestRoundTripLocalCancelIsNeutral`,
+  `TestReadAfterLocalCloseIsErrClosed` (red-check на обеих правках), пакет под `-race`, стенды
+  `lx-test`. `option/`, провод, дефолты — без изменений. Между lx.4 и lx.8 xhttp не менялся, так что
+  обновление до lx.8 жалобу не закрывало. Живой A/B 2026-09-24 на двух узлах `vless+xhttp+reality`
+  под urltest в selector'е (auto, stream-up, флап из четырёх outbound; переключения на живом download):
+  lx.8 — 13/13/15 строк ERROR `response body closed`, HEAD — 0/0/0 при тех же соединениях и всех curl
+  200; `cause=failing` — 0 у обоих (на быстрых узлах дефект брейкера вживую не проявляется, его держит
+  юнит). ⚠️ Подтверждение репортёра впереди.
+
 #### v1.14.1-lx.8
 
 - 🔗 **gRPC `service_name` с ведущим `/` = custom path в конвенции Xray**
@@ -89,7 +115,7 @@ required for stable tags); this changelog section is the fallback used for pre-r
   Было: в апстримном `switch` по `options.UDPRelayMode` нет ветки `default`, поэтому `"qiuc"`, `"Native"`,
   `"udp"` и любое другое значение молча означали `native` — пользователь, написавший `quic` с опечаткой,
   получал не тот режим UDP-релея и никакого сигнала об этом. Соседняя опция `congestion_control` при
-  опечатке даёт честную ошибку `unknown congestion control algorithm: <value>` (из `sing-quic`), то есть
+  опечатке даёт ошибку `unknown congestion control algorithm: <value>` (из `sing-quic`), то есть
   поведение расходилось внутри одного outbound'а; документация апстрима знает ровно два значения —
   `native` и `quic`. Стало: `unknown udp_relay_mode: <value> (expected native or quic)` при загрузке
   конфига. Правка в `protocol/tuic/outbound.go`, маркер `// lx: SPEC 091`. Границы не меняются: пустая
@@ -106,7 +132,7 @@ required for stable tags); this changelog section is the fallback used for pre-r
   ([SPEC 091](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/091-CONFIG_VALIDATION_TUIC_MASQUE/SPEC.md) §2).
   Было: `resolveVHTTP` вызывался **раньше** проверки `uri`, поэтому забывший `uri` видел разное в
   зависимости от `vhttp`: при `h2` — `masque: vhttp h2 is not implemented for the standard profile`
-  (честно, но не про то — уводило чинить `vhttp`, после чего человек упирался во вторую ошибку), при
+  (верно по сути, но не про то — уводило чинить `vhttp`, после чего человек упирался во вторую ошибку), при
   `h3`/`auto`/не задано — `masque: uri is required for the standard profile`, которая не говорила, **что**
   туда писать. Стало: проверка `uri` поднята сразу за `resolveLegacyOptions` (legacy-поля могут его
   заполнять — поэтому не выше), и её текст самодостаточен:
@@ -433,7 +459,7 @@ Go-тулчейна. Наших изменений поведения нет —
 
 - ⬆️ **База апстрима: `upstream/stable` b7eb49bb8 (`v1.14.0` + 33, «Fix cronet-go»,
   2026-09-12)** — мерж de3ac74ff, merge-base a25ad8ce5 (предыдущий мерж 03e309113), 17 коммитов
-  честной истории, 35 файлов. Прямой `git merge` дал 2 конфликта: `transport/wireguard/endpoint.go`
+  полной истории, 35 файлов. Прямой `git merge` дал 2 конфликта: `transport/wireguard/endpoint.go`
   (case-метки `onPauseUpdated`) и `go.sum`. Автослияния `protocol/group/selector.go`,
   `route/route.go`, `daemon/instance.go` сверены построчно — только lx-швы; snap-проверка
   файлов без lx-авторства чистая; маркеры SPEC 053/083 в `common/tls/reality_client.go` на месте.
@@ -527,7 +553,7 @@ Go-тулчейна. Наших изменений поведения нет —
   308 — апстрим переписывает историю, testing-контент лежал у нас с другими хешами),
   реальный объём 207 файлов. Прямой `git merge` дал 125 конфликтов; 74 файла без наших
   коммитов взяты у апстрима как есть, 51 lx-файл прошёл per-file 3-way с чистой апстримной
-  базой — честных конфликтов осталось 13, все на lx-швах. Три молчаливых автослияния
+  базой — настоящих конфликтов осталось 13, все на lx-швах. Три молчаливых автослияния
   (задвоенный `DNSResponseAddresses` в `adapter/inbound.go`, `protocol/tun/inbound.go`,
   `log/factory.go`) сняты сверкой zero-lx файлов с апстримом. `*.pb.go` регенерированы
   `protogen` из разрешённого `.proto` (наш rpc/message-блок + апстримное `certDomains = 15`).
@@ -856,7 +882,7 @@ NAND-overlay — износ флеша. Теперь путь настраива
   резолвится в абсолютный при старте — служба живёт с cwd `/`).
 - **Admin-плоскость перестала пере-выводить путь из state-dir**: фактический
   путь проносится в контроллер, `GET /admin/info` (`log_path`) и tail-эндпоинт
-  `GET /admin/logs` отдают его; dev-запуск без файла отвечает честным 404
+  `GET /admin/logs` отдают его; dev-запуск без файла отвечает 404
   «лог в терминале», а не фантомным derived-путём.
 - **Дефолт `log_max_size_mb` 20 → 1**: страховочный потолок размера; вместе с
   бэкапом максимум ~2 МБ на диске. Ротация по возрасту (24 ч) не тронута.
@@ -1327,7 +1353,7 @@ AAR не затронут: `gomobile` собирает `experimental/libbox`, к
 **Проценты и скорости — дельты, и это видно.** `/proc/stat` и `/proc/net/dev`
 отдают монотонные счётчики, поэтому демон хранит предыдущий замер и рядом с
 производным числом отдаёт `interval_seconds`: 12.4% за пять секунд и за час
-значат разное. Первый запрос после старта честно отдаёт `usage_percent: null`
+значат разное. Первый запрос после старта отдаёт `usage_percent: null`
 и `interval_seconds: 0` — считать не от чего, а ноль читался бы как
 «простаивает». Сырые счётчики отдаются **вместе** с производными: счётчик
 переживает разрывы, скорость на них врёт.
@@ -1341,7 +1367,7 @@ Mach API, поэтому там `null`. Клиент проверяет `null`, 
 ⚠️ **Отдельная находка про macOS.** `NET_RT_IFLIST2` отдаёт структуру с именем
 `if_data64`, но байтовые счётчики в ней фактически **32-битные** и
 переполняются каждые 4 ГБ — проверено на живой машине, значения сходятся с
-`netstat -ib` по модулю 2³² (пакеты и ошибки при этом честные 64-битные).
+`netstat -ib` по модулю 2³² (пакеты и ошибки при этом полные 64-битные).
 Демон доращивает их до 64 бит по дельтам, иначе график обрывался бы в ноль
 каждые несколько часов. На Linux этого не нужно — `/proc/net/dev` 64-битный.
 
@@ -1445,7 +1471,7 @@ SPEC 065); вне Linux они молча возвращают «нечего с
 
 **Отдельного debug-порта нет по построению.** Ручки нужны именно удалённо —
 лаунчер снимает профиль с сервера, который странно себя ведёт, — поэтому они
-идут за клиентским сертификатом. Это честный размен: тот же сертификат уже
+идут за клиентским сертификатом. Это осознанный размен: тот же сертификат уже
 разрешает `POST /admin/apply`, то есть исполнение произвольного конфига в
 контексте демона.
 
@@ -1453,7 +1479,7 @@ SPEC 065); вне Linux они молча возвращают «нечего с
 это пик за жизнь процесса, он не убывает, и на графике утечка неотличима от
 разового всплеска. Теперь `rss_current_bytes` (на linux — `/proc/self/statm`,
 без cgo) и `rss_peak_bytes` раздельно, с единицей в имени поля. На darwin
-честный `task_info` требует cgo, поэтому там `-1`.
+точный `task_info` требует cgo, поэтому там `-1`.
 
 **`/admin/stats` без ядра отдаёт `null` во всех полях и код 200**, а не 503:
 ручка описывает демон и обязана отвечать в `idle` и `fatal` — ровно в тех
@@ -2129,7 +2155,7 @@ gVisor: шесть ретрансмитов, 1+2+4+8+16+32+64 — **127 секу
 найденных адверсариальной проверкой диффа. Именно 15, а не 5: столько же длится
 проба здоровья, и пользовательский бюджет ниже пробного открыл бы вилку, в
 которой медленный-но-живой узел проходит пробы, а все боевые дайлы через него
-падают. Замеренный потолок честного холодного дайла — 4.8 с при нулевом RTT
+падают. Замеренный потолок настоящего холодного дайла — 4.8 с при нулевом RTT
 (пересборка устройства уровня 3 плюс рукопожатие), в поле с потерянным первым
 пакетом инициации 8–10 с; пятисекундный кап резал бы свои же пробуждения.
 Дедлайн привязан к фазе установки через `defer cancel()` и физически не может
@@ -2656,7 +2682,7 @@ races under `-race`, adversarial uphold 6/6); the field run of the nudge
 waits for the LxBox `USER_PRESENT` receiver.
 
 Upstream note: `upstream/testing` was force-pushed again after our 2026-08-01
-merge; the honest subject-level comparison shows zero genuinely new commits,
+merge; the subject-level comparison shows zero genuinely new commits,
 so this rc carries no upstream delta.
 
 #### v1.14.0-lx.18
