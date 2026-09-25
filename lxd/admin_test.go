@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -535,6 +536,10 @@ func TestAdminInfoEndpoint(t *testing.T) {
 	control.serverFingerprint = "abc123"
 	control.advertiseAddr = "127.0.0.1:29091"
 	control.startedAt = time.Now().Add(-3 * time.Second)
+	control.executable = &executableIdentity{
+		path:   "/Library/PrivilegedHelperTools/sing-box-lxd",
+		sha256: "0f1e",
+	}
 	handler := control.adminHandler("")
 
 	request := httptest.NewRequest(http.MethodGet, "/admin/info", nil)
@@ -559,5 +564,71 @@ func TestAdminInfoEndpoint(t *testing.T) {
 	}
 	if pid, _ := payload["pid"].(float64); int(pid) != os.Getpid() {
 		t.Fatalf("pid = %v, want %d", payload["pid"], os.Getpid())
+	}
+	if payload["executable"] != "/Library/PrivilegedHelperTools/sing-box-lxd" || payload["executable_sha256"] != "0f1e" {
+		t.Fatalf("executable/executable_sha256 = %v/%v", payload["executable"], payload["executable_sha256"])
+	}
+}
+
+// TestAdminInfoExecutableHash: the hash is computed once, in the background,
+// from the file itself; until then (and without a binary) the fields are
+// present and empty rather than missing.
+func TestAdminInfoExecutableHash(t *testing.T) {
+	control := newTestController(t, &fakeReloader{}, nil)
+	status, payload := serveAdmin(t, control.adminHandler(""), httptest.NewRequest(http.MethodGet, "/admin/info", nil))
+	if status != http.StatusOK || payload["executable"] != "" || payload["executable_sha256"] != "" {
+		t.Fatalf("without an identity the fields must be empty strings, got %d %v/%v", status, payload["executable"], payload["executable_sha256"])
+	}
+
+	binary := filepath.Join(t.TempDir(), "sing-box")
+	content := []byte("the running core")
+	if err := os.WriteFile(binary, content, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	identity := newExecutableIdentity(binary)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		path, sum := identity.snapshot()
+		if sum != "" {
+			if path != binary || sum != shaOf(content) {
+				t.Fatalf("identity %s %s, want %s %s", path, sum, binary, shaOf(content))
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the executable hash never arrived")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestAdminClientCodeNameNorm: /admin/client-code takes names of 1-64
+// printable characters, trimmed; empty is no name; anything else is a 400
+// "client name: …" (SPEC 103 §2.13).
+func TestAdminClientCodeNameNorm(t *testing.T) {
+	control := newTestController(t, &fakeReloader{}, nil)
+	control.clients = newTestRegistry(t)
+	handler := control.adminHandler("s3cret")
+	mint := func(name string) (int, map[string]any) {
+		body, _ := json.Marshal(map[string]string{"name": name})
+		request := httptest.NewRequest(http.MethodPost, "/admin/client-code", bytes.NewReader(body))
+		request.RemoteAddr = "127.0.0.1:12345"
+		request.Header.Set("Authorization", "Bearer s3cret")
+		return serveAdmin(t, handler, request)
+	}
+	for _, name := range []string{"", strings.Repeat("n", 64), "  singbox-launcher-u  "} {
+		if status, payload := mint(name); status != http.StatusOK {
+			t.Fatalf("name %q: %d %v", name, status, payload)
+		}
+	}
+	if control.clients.activeCodeName != "singbox-launcher-u" {
+		t.Fatalf("the name must be stored trimmed, got %q", control.clients.activeCodeName)
+	}
+	for _, name := range []string{strings.Repeat("n", 65), "tab\there"} {
+		status, payload := mint(name)
+		message, _ := payload["error"].(string)
+		if status != http.StatusBadRequest || !strings.HasPrefix(message, "client name: ") {
+			t.Fatalf("name %q: want 400 client name, got %d %v", name, status, payload)
+		}
 	}
 }

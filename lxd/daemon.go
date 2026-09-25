@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -26,6 +27,7 @@ import (
 	"github.com/sagernet/sing-box/daemon"
 	"github.com/sagernet/sing-box/log"
 	E "github.com/sagernet/sing/common/exceptions"
+	"github.com/sagernet/sing/service"
 
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
@@ -56,6 +58,10 @@ type Options struct {
 	LogMaxSizeMB   int
 	LogMaxBackups  int
 	LogMaxAgeHours int
+	// LogTakenOver: the caller already took the log over with TakeOverLog
+	// (the Windows service does it before its self-check, so a refusal
+	// lands in the file); Run leaves stdio alone and only reports LogFile.
+	LogTakenOver bool
 	// DHCPLeaseFiles overrides the client directory's lease paths (SPEC 066);
 	// empty = the platform defaults.
 	DHCPLeaseFiles []string
@@ -72,17 +78,16 @@ const (
 // absent config must leave the daemon reachable, because the control channel
 // is needed exactly when the data plane is down.
 func Run(ctx context.Context, options Options) error {
-	// Log ownership first, before anything logs: under a service manager
-	// (stdout is not a terminal) the daemon takes the log file over from
-	// launchd's plain append redirect and rotates it; in a terminal the log
-	// stays on the operator's screen.
-	if options.LogFile != "" && logRotationSupported && !stdoutIsTerminal() {
-		rotator := newLogRotator(options.LogFile, options.LogMaxSizeMB, options.LogMaxBackups, options.LogMaxAgeHours)
-		if err := rotator.Start(); err != nil {
-			log.Warn(E.Cause(err, "lxd: log rotation disabled"))
-		} else {
-			defer rotator.Stop()
+	// Log ownership first, before anything logs.
+	if !options.LogTakenOver {
+		if release := TakeOverLog(options); release != nil {
+			defer release()
 		}
+	}
+	// The core needs the service registry the CLI puts into its context
+	// (include.Context); without it the first apply panics inside the core.
+	if service.RegistryFromContext(ctx) == nil {
+		return E.New("lxd: context without service registry")
 	}
 
 	stateStore, err := newStore(options.StateDir)
@@ -112,6 +117,10 @@ func Run(ctx context.Context, options Options) error {
 	if abs, absErr := filepath.Abs(options.StateDir); absErr == nil {
 		absStateDir = abs
 	}
+	ownExecutable, err := resolveOwnExecutable()
+	if err != nil {
+		log.Warn(E.Cause(err, "lxd: /admin/info will not name the executable"))
+	}
 	control := &controller{
 		// serviceStats wraps the same startedService: the stats endpoint needs
 		// the traffic counters, which the narrow reloader interface does not
@@ -125,6 +134,7 @@ func Run(ctx context.Context, options Options) error {
 		infoLogPath:      options.LogFile,
 		infoTLS:          options.TLS,
 		startedAt:        time.Now(),
+		executable:       newExecutableIdentity(ownExecutable),
 		memory:           newMemoryCache(),
 		clientInfo:       newClientInfo(labels, options.DHCPLeaseFiles),
 		host:             newHostCache(absStateDir),
@@ -176,7 +186,7 @@ func Run(ctx context.Context, options Options) error {
 				grpcServer.ServeHTTP(writer, request)
 				return
 			}
-			adminHandler.ServeHTTP(writer, request)
+			serveAdminRecovered(adminHandler, writer, request)
 		}), &http2.Server{IdleTimeout: idleTimeout}),
 	}
 
@@ -263,8 +273,78 @@ func Run(ctx context.Context, options Options) error {
 			shutdown(startedService, httpServer, grpcServer)
 			control.applyAccess.Unlock()
 			return nil
+		case <-ctx.Done():
+			// The owner cancelled: the Windows SCM handler on Stop/Shutdown
+			// (SPEC 103 §2.10). Same teardown as a SIGTERM; on unix nobody
+			// cancels this context, so nothing changes there.
+			log.Info("lxd: stop requested, shutting down")
+			control.applyAccess.Lock()
+			control.closed = true
+			shutdown(startedService, httpServer, grpcServer)
+			control.applyAccess.Unlock()
+			return nil
 		}
 	}
+}
+
+// TakeOverLog makes the daemon own its log file: under a service manager
+// (stdout is not a terminal) the daemon takes the log over from launchd's
+// plain append redirect (or the SCM's missing stdio) and rotates it; in a
+// terminal the log stays on the operator's screen. release stops the
+// rotation; nil when nothing was taken over.
+func TakeOverLog(options Options) (release func()) {
+	if options.LogFile == "" || !logRotationSupported || stdoutIsTerminal() {
+		return nil
+	}
+	rotator := newLogRotator(options.LogFile, options.LogMaxSizeMB, options.LogMaxBackups, options.LogMaxAgeHours)
+	if err := rotator.Start(); err != nil {
+		log.Warn(E.Cause(err, "lxd: log rotation disabled"))
+		return nil
+	}
+	return rotator.Stop
+}
+
+// serveAdminRecovered runs the admin plane under a panic guard: net/http
+// recovers a handler panic by closing the connection (the client sees EOF)
+// and prints the stack to stderr, which a service does not have. Here the
+// panic goes to the daemon log and, if nothing was sent yet, answers a JSON
+// 500.
+func serveAdminRecovered(handler http.Handler, writer http.ResponseWriter, request *http.Request) {
+	tracked := &sentTracker{ResponseWriter: writer}
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		if r == http.ErrAbortHandler {
+			panic(r)
+		}
+		log.Error("lxd: panic serving ", request.Method, " ", request.URL.Path, ": ", r, "\n", string(debug.Stack()))
+		if !tracked.sent {
+			writeJSON(writer, http.StatusInternalServerError, map[string]any{"error": fmt.Sprint("internal panic: ", r)})
+		}
+	}()
+	handler.ServeHTTP(tracked, request)
+}
+
+// sentTracker records whether the response header has gone out.
+type sentTracker struct {
+	http.ResponseWriter
+	sent bool
+}
+
+func (w *sentTracker) WriteHeader(statusCode int) {
+	w.sent = true
+	w.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (w *sentTracker) Write(data []byte) (int, error) {
+	w.sent = true
+	return w.ResponseWriter.Write(data)
+}
+
+func (w *sentTracker) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
 }
 
 func shutdown(startedService *daemon.StartedService, httpServer *http.Server, grpcServer interface{ Stop() }) {

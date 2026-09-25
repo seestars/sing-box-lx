@@ -1,6 +1,31 @@
 // lx:begin idle-suspend
 package route
 
+import (
+	"context"
+
+	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing/service"
+)
+
+// lxWG returns the resolved lx.wg values from the box context (SPEC 098), or
+// all-off when the context carries none (tests, a router built outside
+// box.New) or is nil.
+func lxWG(ctx context.Context) option.LXWGResolved {
+	if ctx == nil {
+		return option.LXWGResolved{}
+	}
+	return service.PtrFromContext[option.LXResolved](ctx).WGOrZero()
+}
+
+// selectionRefs counts the edges of the active routing tree leading into one
+// tag, by class (SPEC 097). Lives in the always-compiled file because the
+// Router struct carries the cache.
+type selectionRefs struct {
+	manual int
+	auto   int
+}
+
 // InvalidateReachability marks the cached reachable set stale so the next idle
 // tick recomputes it. Called (via service.FromContext[adapter.ReachabilityInvalidator])
 // from the three event points that change the active routing tree — a selector

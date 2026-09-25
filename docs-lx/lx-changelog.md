@@ -28,6 +28,246 @@ required for stable tags); this changelog section is the fallback used for pre-r
 > тогда. Пользовательские ноты билингвальны там, где это важно, — в
 > [`releases/`](releases/).
 
+#### v1.14.2-lx.2-rc.3
+
+Пререлиз линии `v1.14.2-lx.2`; подробности — в секции `v1.14.2-lx.2` ниже.
+
+- 🐛 **lxd: служба Windows падала на первом `/admin/apply`** (rc.1/rc.2) — тело службы получало контекст без реестра сервисов ядра, apply паниковал, клиент видел EOF. Теперь служба запускает демон на контексте ядра, как консольный `lxd`; `lxd.Run` без реестра отказывает сразу (`lxd: context without service registry`); паника в admin REST — JSON 500 и стек в `lxd.log`, в gRPC — `codes.Internal` и стек в лог (две строки `// lx:` в `daemon/server.go`); на Windows stdlib `log` (ошибки net/http) тоже пишется в `lxd.log`. ([SPEC 103 §4.4](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/103-LXD_WINDOWS_SERVICE/SPEC.md))
+- ✨ **XHTTP: версия HTTP по `tls.alpn`** и 🪟 **служба Windows (SCM)** — из rc.2/rc.1.
+- База — sing-box `v1.14.2`, дрейфа от `upstream/stable` нет.
+
+#### v1.14.2-lx.2-rc.2
+
+Пререлиз линии `v1.14.2-lx.2`; подробности — в секции `v1.14.2-lx.2` ниже.
+
+- ✨ **XHTTP: версия HTTP по `tls.alpn`, как у Xray** — `["h3"]` → HTTP/3 по QUIC (узлы только с h3, [issue #25](https://github.com/Leadaxe/sing-box-lx/issues/25)), `["http/1.1"]` → HTTP/1.1, без TLS → HTTP/1.1 (было h2c), REALITY → HTTP/2, иначе HTTP/2. Отпечаток uTLS на HTTP/3 не применяется (предупреждение в логе), QUIC-рукопожатие — Chrome-подобное. Новых ключей нет. ([SPEC 104](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/104-XHTTP_HTTP_VERSION_PARITY/SPEC.md))
+- 🪟 **lxd: служба Windows (SCM)** — из rc.1 ([SPEC 103](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/103-LXD_WINDOWS_SERVICE/SPEC.md)).
+- База — sing-box `v1.14.2`, дрейфа от `upstream/stable` нет.
+
+#### v1.14.2-lx.2
+
+- 🪟 **lxd: служба Windows (SCM) с защищённой копией ядра**
+  ([SPEC 103](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/103-LXD_WINDOWS_SERVICE/SPEC.md);
+  решение владельца 2026-09-24, пара SPEC 141 лаунчера). На Windows `lxd` собирался, но `--service` был заглушкой,
+  а лаунчер запускал ядро с правами администратора из `%LOCALAPPDATA%\singbox-launcher\bin` — каталога, куда пишет
+  любой процесс пользователя: подмена `sing-box.exe` или `libcronet.dll` давала код с высокой целостностью (тот же
+  класс дефекта, что SPEC 100 закрыл на macOS). Теперь модель SPEC 100 перенесена на SCM: служба `sing-box-lxd`
+  исполняет защищённую копию, а не файл, из которого её поставили, и поднимает last-good до входа пользователя.
+  Код — только пакет `lxd/`, `cmd/sing-box/cmd_lxd_lx.go` и новые `cmd/sing-box/*_windows_lx.go`; апстримных
+  файлов ноль (с rc.3 — две строки `// lx:` в `daemon/server.go`, recover-интерсепторы gRPC).
+  - Служба SCM `sing-box-lxd`: `LocalSystem`, автозапуск, зависимость `Tcpip`; `BinaryPathName` собирается
+    `ComposeCommandLine` (путь копии в кавычках + `lxd --state-dir <abs>`); восстановление — три рестарта через 5 с,
+    сброс через 86400 с, рестарт и при остановке с ненулевым кодом; DACL службы
+    `D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x2008d;;;AU)` — Authenticated Users только читают конфигурацию и состояние.
+    Демон под SCM идёт через `svc.Run`: `START_PENDING` → daemon.json → лог → самопроверка → `Chdir` в state-каталог →
+    сразу `RUNNING`; stop/shutdown отменяют `lxd.Run` (новая ветка `ctx.Done()`, общая для всех платформ) со сторожем
+    10 с.
+  - Защищённая копия и набор: `<ProgramFiles>\sing-box-lxd\sing-box-lxd.exe` плюс `libcronet.dll`, если она лежит
+    рядом с источником (`wintun.dll` встроен в `sing-tun` и в набор не входит). Замена члена набора — временный файл
+    → DACL → сверка sha256 → `rename` старого в `.old` → временный на место; одинаковый набор не трогается
+    (`binary set unchanged (…), copy skipped`), остатки `.old`/temp прошлого прогона убираются, незнакомый файл в
+    каталоге копии — отказ с `Remove-Item`. Сайдкар `sing-box-lxd.install.json` — отдельная структура: `source`,
+    `version`, `installed_at`, `service`, `files[{name, sha256}]`, `warnings[{code, text}]`; сайдкар macOS не изменился
+    ни по ключам, ни по значениям (golden-тест).
+  - Инвариант «защищённый путь»: каждое звено от корня тома открывается без следования ссылкам, владелец и DACL
+    читаются с дескриптора; у предков — владелец SYSTEM/Administrators/TrustedInstaller и у чужих SID нет
+    `DELETE`/`WRITE_DAC`/`WRITE_OWNER`/`GENERIC_WRITE`/`GENERIC_ALL`/`FILE_DELETE_CHILD`, у каталога копии и файлов
+    набора — никакой чужой записи; reparse point, NULL DACL, неизвестный тип разрешающей ACE — нарушение; том —
+    фиксированный NTFS. Предикат портируемый, табличный тест идёт на Linux.
+  - Захват `<ProgramData>\sing-box-lxd` до записи секрета: `SeTakeOwnershipPrivilege`/`SeRestorePrivilege`, обход
+    сверху вниз через дескрипторы без следования ссылкам; корень — владелец Administrators и защищённый DACL, узел
+    ниже вне нормы — явный защищённый DACL, файлы демона с владельцем SYSTEM и унаследованными ACE — норма; строки
+    `took ownership of …`, `replaced DACL on …` или `data dir … is protected`; reparse point и жёсткие ссылки — отказ.
+    Секрет и серверная пара не перегенерируются; если чужой SID владел деревом или читал `state\`, install печатает
+    `WARN: … rotate the admin secret …` и кладёт его в `warnings` сайдкара (у install под `runas` консоли нет).
+  - `--service=install` (elevated): каталог данных → daemon.json (+ `log_file` = `<ProgramData>\sing-box-lxd\logs\lxd.log`,
+    если ключа нет) → stop с ожиданием `STOPPED` до 30 с → замена образа → сайдкар → `CreateService`/`UpdateConfig`,
+    recovery, DACL службы → start с ожиданием `RUNNING` → отчёт status (не `OK` — выход 1) → сводка с
+    `Restart-Service sing-box-lxd`. Провал замены или конфигурации после остановки возвращает прежний образ и
+    поднимает службу на нём (`install failed, previous service image restarted`). `--service=copy` — то же без SCM;
+    `--service=uninstall [--keep-copy] [--purge] [--dry-run]` удаляет набор только при совпадении sha каждого файла с
+    сайдкаром, дефолтный каталог копии — если опустел, `--purge` — весь `<ProgramData>\sing-box-lxd`;
+    `--service=install-user` на Windows — отказ.
+  - `--service=status` без прав (SCM открывается с `SC_MANAGER_CONNECT`, служба — только на запрос): блоки
+    `[service]`/`[copy]`/`[data dir]` и вердикт с кодами 0 `OK` / 2 `MISMATCH`·`UNSAFE` / 3 `NOT INSTALLED` /
+    4 `COPY ONLY` / 5 `NOT RUNNING` / 1 ошибка. Отличие от macOS: argv[0] службы не каноническая копия — `UNSAFE`;
+    также `UNSAFE` — путь с пробелом без кавычек и DACL службы, дающий чужому SID смену конфигурации или владельца.
+  - `--invite-out <файл>` / `--invite-name <имя>` у `--service=install` (macOS и Windows; на Linux, где install
+    печатает рецепт, — отказ) и `client add --invite-out <файл>` на всех платформах: инвайт пишется в новый файл
+    (Unix `O_CREAT|O_EXCL|O_NOFOLLOW` 0600, Windows `CREATE_NEW` и сверка `GetFinalPathNameByHandle`), существующий
+    файл — отказ до любых изменений; имя по умолчанию при `--invite-out` — `singbox-launcher`; провал минта с
+    `--invite-out` — выход 1 при установленной службе, файл удаляется. Без флагов поведение macOS прежнее.
+  - Имя клиента (`--name`, `--invite-name`, поле `name` в `/admin/client-code`) нормируется на минте: после обрезки
+    пробелов — пусто или 1–64 печатных символа, иначе отказ CLI и `400 client name: …`.
+  - Enroll по именному инвайту заменяет клиента с тем же именем (старый сертификат отзывается); безымянный инвайт
+    добавляет, как раньше. Так повторное сопряжение лаунчера не копит записи `singbox-launcher`.
+  - Самопроверка при старте: на Windows `lxd` под SCM на незащищённом бинаре не стартует (`refusing to run as a
+    Windows service from …`), повышенный `lxd`/`run` вне SCM и `--allow-unsafe-exec` — WARN, без повышения — не
+    проверяется. Пройденная проверка в контексте службы пишет одну строку INFO — на Windows
+    (`self-check ok: protected …, windows service sing-box-lxd`) и на macOS
+    (`self-check ok: root-owned …, launchd service com.leadaxe.sing-box-lxd`).
+  - Лог на Windows: `logs\lxd.log`, один дескриптор на всю жизнь процесса (`SetStdHandle` на stdout/stderr, подмена
+    `os.Stdout`/`os.Stderr` и стандартного логгера), ротация копированием в `lxd.log.1` с усечением — `rename` живого
+    файла без `FILE_SHARE_DELETE` невозможен; строки между копированием и усечением теряются.
+  - Поиск DLL: `SetDefaultDllDirectories(APPLICATION_DIR | SYSTEM32)` в `init` любой сборки `with_lxd` на Windows (с
+    проверкой процедуры — Windows 7 без KB2533623); если в наборе нет `libcronet.dll`, служба и повышенный `run`
+    закрепляют её загрузку за каталогом exe, и naive-outbound получает ошибку вместо поиска по `PATH` под SYSTEM.
+  - CI: `GOOS=windows go vet ./lxd/ ./cmd/sing-box/` в lint и джоба `test-windows` на `windows-latest` (`go vet` и
+    `go test` пакетов `lxd` и `cmd/sing-box` с полным набором тегов).
+  - Поведение macOS, Linux и Android не меняется, кроме перечисленного: флаги `--invite-out`/`--invite-name`, норма
+    имени клиента, замена клиента именным enroll, строка INFO самопроверки на macOS. Win7-386 собирается без
+    `with_lxd` — службы там нет. Живой прогон на Windows (install → status `OK` → повторный install → copy →
+    uninstall `--keep-copy` → uninstall, `sc qc`/`sdshow`, `icacls`, ротация, сопряжение лаунчера через
+    `--invite-out`) — за лаунчер-сессией.
+
+- ✨ **XHTTP: версия HTTP по `tls.alpn`, как у Xray — HTTP/1.1, HTTP/2, HTTP/3**
+  ([SPEC 104](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/104-XHTTP_HTTP_VERSION_PARITY/SPEC.md),
+  [issue #25](https://github.com/Leadaxe/sing-box-lx/issues/25)). Клиент был HTTP/2-only, и сервер Xray с
+  `tlsSettings.alpn: ["h3"]` (слушает только QUIC) не поднимался. Теперь правило `decideHTTPVersion` Xray:
+  `tls.alpn: ["h3"]` → HTTP/3 по QUIC/UDP через тот же `detour`; `["http/1.1"]` и конфиг без TLS → HTTP/1.1
+  (без TLS раньше был h2c; сервер Xray принимает обе формы); REALITY → всегда HTTP/2, `tls.alpn` без `h2`
+  заменяется на `["h2"]` с предупреждением; иначе HTTP/2 как раньше. Новых ключей нет.
+  - HTTP/3: `quic.Config` как у Xray (`MaxIdleTimeout` 300 с, `KeepAlivePeriod` из `xmux.h_keep_alive_period`,
+    `0` → 10 с, `MaxIncomingStreams: -1`, PMTUD выключен вне linux/windows/darwin, `ChromeParrot`); контроль
+    перегрузки — Cubic (у Xray BBR). `utls.fingerprint` на HTTP/3 не применяется (предупреждение, как у Xray);
+    uTLS-конфиг переводится в `crypto/tls` lx-файлом `common/tls/utls_client_std_lx.go`; `disable_sni` выключает
+    профиль Chrome для узла; ECH — узел грузится, dial отвечает ошибкой. Без `with_quic` конфиг с `["h3"]`
+    отвергается при загрузке.
+  - HTTP/1.1: download-GET и потоковые запросы — каждый по своему соединению с `Connection: close`,
+    upload-POST'ы `packet-up` — keep-alive.
+  - Типы ошибок quic-go/http3 не выходят за conn (аналог SPEC 082): текст сохранён, `Timeout()`/`Temporary()`
+    сняты, ошибки уровня соединения по-прежнему `net.ErrClosed`.
+  - Живой стенд `lx-test/xhttp_h3/run.sh` (Xray 26.9.9 @ `60e2a0c`, h3-only inbound на loopback, конфиг
+    репортёра #25): `packet-up`, `stream-up`, `stream-one` — OK. Апстримных файлов ноль.
+
+#### v1.14.2-lx.1
+
+- ⬆️ **База апстрима: sing-box v1.14.2** ([SPEC 102](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/102-UPSTREAM_SYNC_1_14_2/SPEC.md);
+  решение владельца 2026-09-24 после lx.13, дрейф 0). Семь апстримных коммитов: сброс сети только по фактической смене
+  интерфейса по умолчанию (`networkResetPending`, диспатч под `interfaceUpdateAccess`), а не на каждом старте, и без purge
+  TCP-NAT (`sing-tun` ddaa4ca25e3b); `service/resolved` — D-Bus-методы резолва не виснут/не падают, `mDNS.ReverseAddr`,
+  `deleteCallback` в `RevertLink`; hysteria2 realm STUN через default domain resolver и port hopping без ухода на другой
+  резолвнутый адрес (`sing-quic` 6a3a24d65b99); hijack-dns отчитывается об успешном хендшейке до обработки;
+  `common/dialer` переписан апстримом (нашей дельты нет); `adapter.DNSQueryOptionsFrom` удалён (не использовался).
+  Ритуал: сабмодуль `sing-tun` слит первым (конфликт `monitor_shared.go` — форма апстрима; дельта форка = только SPEC 040
+  self-heal), затем ядро — четыре конфликта (`go.mod`/`go.sum` с сохранением четырёх `replace`, `service/resolved` ×2 —
+  форма апстрима: наша сторона была testing-формой тех же фиксов из SPEC 095). Швы SPEC 047/073 в `route/network.go`
+  и SPEC 046 в `route/dns.go` целы; `box.go` уже нёс порядок `ConnectionManager` → `NetworkManager`. `upstream.version`
+  → 1.14.2, линия релизов начинается с `v1.14.2-lx.1`. Тулчейн и CI-скрипты апстрим не менял, dry run не требовался.
+  Прогон смены сети на устройстве — при перепине LxBox.
+
+#### v1.14.1-lx.13
+
+- 🧩 **Корневой блок `lx` конфига**
+  ([SPEC 098](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/098-LX_ROOT_CONFIG_BLOCK/SPEC.md);
+  решение владельца 2026-09-24). Глобальные ручки форка собраны в одном блоке по подсистемам:
+  `lx.wg` — `idle_suspend`, `idle_suspend_reachable`, `idle_teardown` (переехали из `route`, семантика SPEC 020 та же)
+  и новые `lazy_build`, `build_max`, `build_overflow` (разбираются и валидируются, действуют с SPEC 097);
+  `lx.masque.idle_timeout` — глобальное окно простоя для masque-узлов без своего ключа (ключ узла сильнее, явный
+  `"0"` в узле держит туннель поднятым). `idle_timeout` узла masque стал указателем, чтобы `"0"` отличался от
+  отсутствия. Старые `route.lx_idle_suspend` / `_reachable` / `_teardown` — алиасы на один релиз: предупреждение на
+  каждый ключ, разные значения в двух местах — ошибка старта `route.lx_idle_suspend conflicts with
+  lx.wg.idle_suspend`. Алиасы снимаются в релизе после перехода LxBox и лаунчера на `lx`. Ошибки валидации называют
+  полный путь ключа; сборка без `with_lx_idle_suspend` отвергает любой ключ `lx.wg` текстом `lx.wg.* is set but this
+  build lacks idle-suspend support…`. Running-config (SPEC 037) отдаёт блок в канонической форме. Подблок `lx.naive`
+  зарезервирован за SPEC 096 и пока отвергается как неизвестный ключ. `make -f Makefile.lx lx-check` проверяет все
+  `lx-test/config/*.json`, добавлен `lx_block.json`.
+- 💤 **WG/AWG-устройство собирается при первом дайле; потолок собранных устройств**
+  ([SPEC 097](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/097-LAZY_WG_DEVICE_BUILD/SPEC.md);
+  профиль LxBox 519: 11 endpoint'ов держали 192 МБ стартовых буферов). Ключи `lx.wg` из SPEC 098 начали действовать
+  (только сборки с `with_lx_idle_suspend`). `lazy_build: true` — endpoint стартует разобранным (уровень 3 SPEC 020),
+  detour резолвится на старте, устройство собирается первым дайлом; узлы с `listen_port` не затрагиваются.
+  `build_max: N` — не больше N собранных устройств: сборка (N+1)-го сначала разбирает жертву — сверх потолка →
+  меньше ручных ссылок (выбор селектора, `final`, цель правила) → меньше авто-ссылок (urltest, detour, цепочка,
+  DNS-detour) → давнее последнее обращение; узел с дайлом в процессе, TCP-потоком или трафиком ≥ 4096 Б с прошлой
+  выборки не разбирается. Жертвы нет — `build_overflow: "wait"` ждёт до дедлайна дайла (не дольше 15 с),
+  `"build"` собирает сверх потолка с предупреждением. `build_max` без `lazy_build` действует с первой пересборки.
+  Лог: `lx idle: lazy <tag> (device not built)`, `lx idle: teardown <tag> by=budget`, `lx idle: build over budget
+  N+1/N`, `build budget exhausted (N built, none idle)`. `GetOutbounds` отдаёт у WG/AWG-узлов `endpointState`
+  (`never_built` / `building` / `up` / `asleep` / `torn_down` / `down`) и `idleSinceSeconds`; libbox
+  `OutboundGroupItem` — `EndpointState`, `IdleSinceSeconds`. Замер на эмуляторе — за владельцем.
+- 🔇 **WireGuard/AWG: успешная переотправка хендшейка без UDP GSO больше не ERROR**
+  ([SPEC 101](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/101-WG_HANDSHAKE_GSO_RETRY_LOG_NOISE/SPEC.md);
+  заявка LxBox #95, Proton AWG). Bind форка wireguard-go после отказа ядра от GSO выключает offload, переотправляет
+  батч без него и возвращает `ErrUDPGSODisabled{RetryErr}`, где `RetryErr` — ошибка повтора (nil при успехе).
+  Data-путь её разворачивал, а `SendHandshakeInitiation`/`SendHandshakeResponse` печатали обёртку целиком как
+  `ERROR … failed to send handshake initiation: disabled UDP GSO on …`, хотя пакет ушёл. Теперь один хелпер
+  `unwrapGSODisabled` на три пути: Verbose при успешной переотправке, ERROR только с реальной ошибкой повтора.
+  Сабмодуль `submodules/wireguard-go` d0568ce; провод не тронут.
+- ℹ️ **Дрейф от `upstream/stable` на срезе: v1.14.2** (7 фикс-коммитов: network reset, resolved, hysteria2 realm STUN и port hopping, отчёт хендшейка hijack-dns, `common/dialer`). Синк отложен в отдельную задачу: пробный мерж конфликтует в `go.mod`/`go.sum` и `service/resolved`. База lx.13 = v1.14.1+34 (SPEC 095).
+
+#### v1.14.1-lx.12
+
+- 🔤 **lxd: файл root-owned копии называется `sing-box-lxd`, а не ярлыком**
+  ([SPEC 100](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/100-LXD_ROOT_OWNED_BINARY/SPEC.md);
+  решение владельца 2026-09-24). Копия — `/Library/PrivilegedHelperTools/sing-box-lxd`, сайдкар —
+  `/Library/PrivilegedHelperTools/sing-box-lxd.install.json`; поля, `--exec-dir`, инвариант, install/copy/status/
+  uninstall/`--keep-copy` и проверка «каталог на месте копии» — как в lx.11. Причина: macOS усекает `comm` до 16
+  символов; `sing-box-lxd` влезает целиком и содержит `sing-box` — `pgrep`/`pkill`/`ps -c` находят демон без `-f`
+  (ярлык обрезался до `com.leadaxe.sing`). Ярлык службы, plist и `XPC_SERVICE_NAME` не меняются.
+  Файл lx.11 `com.leadaxe.sing-box-lxd` и его сайдкар ядро не читает и не трогает; plist, исполняющий такой файл,
+  status даёт `MISMATCH` (2) — «not an installed copy», до переустановки. Миграции нет (установок lx.11 нет).
+
+#### v1.14.1-lx.11
+
+- 🔒 **lxd: системная служба исполняет root-owned копию, а не бинарь из бандла — закрыто повышение
+  привилегий** ([SPEC 100](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/100-LXD_ROOT_OWNED_BINARY/SPEC.md)).
+  `--service=install` писал в `ProgramArguments[0]` plist'а LaunchDaemon путь `os.Executable()` — на практике
+  бинарь в бандле лаунчера с владельцем-пользователем (и под `/Applications`, который `root:admin 0775`); launchd
+  исполнял его от root на каждом старте — любой процесс пользователя, заменивший файл, получал root. Теперь
+  install копирует себя в `/Library/PrivilegedHelperTools/com.leadaxe.sing-box-lxd` (`root:wheel 0755`; плоский файл с
+  именем ярлыка по соглашению Apple, решение владельца 2026-09-24; каталог проверяется от `/`: каждый компонент — не
+  симлинк, uid 0, без записи group/other; дефолтный каталог обязан существовать, `--exec-dir` создаётся `root:wheel
+  0755`; каталог на месте копии — остаток папочной раскладки rc — отказ `target is a directory (legacy layout); remove
+  it: sudo rm -rf <путь>`, сам не удаляется): временный файл с уникальным именем, fsync, chown, chmod, сверка sha256 с источником,
+  `rename` (перезапись на месте запрещена — macOS убивает процесс со сменившимися подписанными страницами; xattr
+  не копируются, переподписи нет); одинаковый бинарь не копируется (`binary unchanged (sha256 …), copy skipped`).
+  Рядом — сайдкар `com.leadaxe.sing-box-lxd.install.json` (`source`, `sha256`, `version`, `installed_at`, `plist_path`, `label`; `0644`). В plist
+  меняется только `ProgramArguments[0]`, `daemon.json`/клиенты не трогаются; support-каталог явно `root:wheel`
+  (наследовал `admin`). Новое: `--exec-dir` (свой каталог копии под тем же инвариантом); `--service=copy` — копия и
+  сайдкар без plist и launchd (для classic TUN лаунчера, SPEC 137 лаунчера; повтор — no-op `already up to date`,
+  последующий install привязывает копию без повторного копирования); `--service=status` без root — plist,
+  программа, владелец/режим, инвариант, хеши, сайдкар, `launchctl print`, вердикт с кодом выхода 0 `OK` /
+  2 `MISMATCH`·`UNSAFE` / 3 `NOT INSTALLED` / 4 `COPY ONLY` / 5 `NOT RUNNING` (на диске исправно, job launchd не
+  запущен — после живой проверки 2026-09-24, где статус говорил OK при незагруженной службе) / 1 ошибка; install
+  после `bootout` ждёт исчезновения старого job'а (до 10 с, с сообщением) и повторяет `bootstrap` на «already in
+  progress»/EIO — на живой проверке bootstrap сразу после bootout падал, и служба оставалась незагруженной ~3 с
+  выгрузки живого ядра; uninstall удаляет копию только при
+  совпадении sha с её сайдкаром (с plist или без), произвольный `ProgramArguments[0]` — никогда;
+  `uninstall --keep-copy` снимает службу, а копию оставляет с отвязанным сайдкаром (→ `COPY ONLY`). Самопроверка при
+  старте `lxd` и `run` под root: служба (`ppid 1` и `XPC_SERVICE_NAME` = ярлык) на не root-owned бинаре не
+  стартует, с путём, uid и режимом в `lxd.log`; прочие запуски от root и `--allow-unsafe-exec` — WARN.
+  `/admin/info` отдаёт `executable` и `executable_sha256` (хеш в фоне при старте). CI: `GOOS=darwin go vet` для
+  `./lxd/ ./cmd/sing-box/` в lint — darwin-половина демона раньше на push не компилировалась. Тесты: табличные
+  предиката/цепочки/самопроверки/копирования/сайдкара (на Linux без root), табличный тест переходов
+  none → copy only → installed → none и аномалий (darwin, через подменяемое окружение); `go test -race ./lxd/
+  ./cmd/sing-box/` зелёный на macOS. ⚠️ Системная служба, поставленная старым ядром, после обновления бинаря до
+  lx.11 на ближайшем рестарте не стартует до `sudo sing-box lxd --service=install` (daemon.json и клиенты
+  сохраняются). Старый лаунчер (до бампа пина) сравнивает пути и покажет «another core» — косметика. Ручная
+  проверка под sudo — за владельцем.
+
+#### v1.14.1-lx.10
+
+- 🔄 **Синк с `upstream/stable`: v1.14.1 + 34 коммита, re-graft форков `wireguard-go` v0.0.7 и `sing-tun`
+  3e03774a** ([SPEC 095](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/095-UPSTREAM_SYNC_1_14_1_PLUS_34/SPEC.md)).
+  Из апстрима: фикс начального WireGuard-хендшейка для доменных peer'ов (резолвер на устройстве,
+  требует wireguard-go v0.0.7), `baderror.WrapH2` в `sing` v0.9.6 (типы h2-ошибок больше не утекают —
+  наши обёртки SPEC 082 в `v2rayhttp`/`v2raygrpclite` сняты, в `v2rayxhttp` остаются), dial-контексты
+  при живых соединениях, таймауты DNS при дедупликации, half-close через обёртки, ротация временных
+  IPv6-адресов, спин read-loop на постоянных ошибках, крэш на битом cache-file, OOM-репорт при чистом
+  завершении, `sing-mux` v0.3.8. Sing-tun: укрепление циклов чтения TUN (SPEC 040 остаётся — acceptLoop
+  апстрим не трогал). Наши швы: SPEC 084 сохранён (апстрим всё ещё закрывает под замком), SPEC 018/035/022
+  наложены на новую дедупликацию DNS аддитивно, флаг `started` SPEC 047 снят (причина ушла), nil-гейт
+  остался. Конфликтов 6, все разобраны руками; автослитые файлы проверены по счётчику lx-маркеров.
+  Живой прогон на эмуляторе (раннбук §1.4, 2026-09-24, три цикла, 8 узлов): регрессий нет; апстримный фикс
+  хендшейка доменных пиров подтверждён (retry 0, переключение 1,1 с против 5,4–5,7 с на lx.9), счётчики
+  SPEC 094 нулевые; libbox API +1 аддитивный метод `hasTunInbound`.
+- 🧯 **Диагностика naive-узла роняла приложение** ([SPEC 099](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/099-GETURL_NAIVE_NIL_REMOTEADDR_PANIC/SPEC.md)).
+  При живом туннеле Диагностика идёт через `GetURLViaOutbound`; обработчик звал `RemoteAddr().String()` на
+  conn'е naive-узла (cronet-go `BidirectionalConn`), у которого адреса нет — nil-интерфейс, паника, конец
+  процесса. Теперь nil-адрес даёт пустое поле `remoteAddr`, статус и тело доезжают. Страж
+  `TestGetURLViaOutbound_NilRemoteAddrIsNotPanic_LX` (red-check пройден). Заявка 4PDA (Huawei P50 Pro, lx.9).
+
 #### v1.14.1-lx.9
 
 - 🧯 **XHTTP: наш же `Close()` больше не считается сбоем — ни для брейкера xmux, ни для лога**

@@ -200,6 +200,11 @@ func NewEndpoint(options EndpointOptions) (*Endpoint, error) {
 		Address:         options.Address,
 		AllowedAddress:  allowedAddresses,
 	}
+	// lx:begin lazy-build
+	if options.LazyDevice {
+		return newLazyEndpoint(options, peers, ipcConf, allowedAddresses, deviceOptions), nil
+	}
+	// lx:end lazy-build
 	tunDevice, err := NewDevice(deviceOptions)
 	if err != nil {
 		return nil, E.Cause(err, "create WireGuard device")
@@ -253,7 +258,7 @@ func (e *Endpoint) Rebuild() error {
 	if e.tunDevice != nil {
 		return nil // never torn down (or already rebuilt)
 	}
-	tunDevice, err := NewDevice(e.deviceOptions)
+	tunDevice, err := newDeviceFn(e.deviceOptions) // lx: SPEC 097 — counted in tests
 	if err != nil {
 		return E.Cause(err, "rebuild WireGuard device")
 	}
@@ -354,28 +359,25 @@ func (e *Endpoint) Start(postStart bool) error {
 	// ERR until a manual reconnect.
 	wgDevice.SetGiveUpRebind(true, e.options.ListenPort == 0)
 	e.tunDevice.SetDevice(wgDevice)
-	var ipcConf strings.Builder
-	ipcConf.WriteString(e.ipcConf)
-	for _, peer := range e.peers {
-		ipcConf.WriteString(peer.GenerateIpcLines())
-	}
-	err = wgDevice.IpcSet(ipcConf.String())
-	if err != nil {
-		wgDevice.Close()
-		return E.Cause(err, "setup wireguard: \n", ipcConf.String())
-	}
-	for _, peer := range e.peers {
+	domainPeers := make(map[device.NoisePublicKey]*peerConfig)
+	for peerIndex, peer := range e.peers {
 		if !peer.destination.IsDomain() {
 			continue
 		}
 		var publicKey device.NoisePublicKey
-		common.Must(publicKey.FromHex(peer.publicKeyHex))
-		wgPeer, found := wgDevice.LookupActivePeer(publicKey)
-		if !found {
+		err = publicKey.FromHex(peer.publicKeyHex)
+		if err != nil {
 			wgDevice.Close()
-			return E.New("missing configured peer: ", peer.destination)
+			return E.Cause(err, "decode public key for peer ", peerIndex)
 		}
-		wgPeer.SetEndpointResolver(func() ([]conn.Endpoint, error) {
+		domainPeers[publicKey] = &e.peers[peerIndex]
+	}
+	if len(domainPeers) > 0 {
+		wgDevice.SetEndpointResolverFunc(func(publicKey device.NoisePublicKey) ([]conn.Endpoint, error) {
+			peer, found := domainPeers[publicKey]
+			if !found {
+				return nil, nil
+			}
 			addresses, lookupErr := e.options.ResolvePeer(peer.destination.Fqdn)
 			if lookupErr != nil {
 				return nil, lookupErr
@@ -394,6 +396,16 @@ func (e *Endpoint) Start(postStart bool) error {
 			}
 			return endpoints, nil
 		})
+	}
+	var ipcConf strings.Builder
+	ipcConf.WriteString(e.ipcConf)
+	for _, peer := range e.peers {
+		ipcConf.WriteString(peer.GenerateIpcLines())
+	}
+	err = wgDevice.IpcSet(ipcConf.String())
+	if err != nil {
+		wgDevice.Close()
+		return E.Cause(err, "setup wireguard: \n", ipcConf.String())
 	}
 	e.device = wgDevice
 	e.pause = service.FromContext[pause.Manager](e.options.Context)

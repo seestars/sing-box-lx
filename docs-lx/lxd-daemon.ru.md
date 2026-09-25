@@ -3,7 +3,7 @@
 > 🌐 English version: **[lxd-daemon.md](lxd-daemon.md)**.
 
 Практическое руководство оператора: что такое `sing-box lxd`, зачем он нужен, как
-ставится на macOS и какие есть подходы на Linux.
+ставится на macOS и Windows и какие есть подходы на Linux.
 
 ## Оглавление
 
@@ -15,6 +15,10 @@
 - [5. Безопасность: кто чем аутентифицируется](#5-безопасность-кто-чем-аутентифицируется)
 - [6. Логи](#6-логи)
 - [7. macOS — автоматическая установка](#7-macos--автоматическая-установка)
+  - [7.1. Root-owned копия бинаря](#71-root-owned-копия-бинаря)
+- [7a. Windows — автоматическая установка](#7a-windows--автоматическая-установка)
+  - [7a.1. Защищённая копия набора](#7a1-защищённая-копия-набора)
+  - [7a.2. Ручная проверка](#7a2-ручная-проверка)
 - [8. Linux — подходы к настройке](#8-linux--подходы-к-настройке)
   - [8.1. Общая часть (любой init)](#81-общая-часть-любой-init)
   - [8.2. systemd (обычный сервер/десктоп)](#82-systemd-обычный-сервердесктоп)
@@ -83,15 +87,15 @@ curl -s http://127.0.0.1:9091/admin/status
 Живёт в `<state-dir>/daemon.json` (0600). **Единственный** источник
 connection-настроек: у команды нет флагов `--listen/--tls/--secret` по
 построению — вопрос «файл или флаг» не существует. Нет файла → dev-дефолты;
-файл никогда не создаётся неявно (его пишет `--service=install` на macOS или
-редактор оператора).
+файл никогда не создаётся неявно (его пишет `--service=install` на macOS и Windows
+или редактор оператора).
 
 | Ключ | Дефолт | Значение |
 |---|---|---|
 | `listen` | `127.0.0.1:9091` | адрес канала (обе плоскости); строка `"host:port"` либо `{"address": [...], "port": N}` для нескольких адресов — см. ниже |
 | `tls` | `false` | mTLS с регистрацией клиентов; `false` = plain h2c, только loopback/dev |
 | `secret` | пусто | Bearer операторских маршрутов; единственный гейт при `tls: false` (пусто = аутентификации нет) |
-| `log_file` | `<родитель state-dir>/lxd.log` | переопределение пути ротируемого лога (абсолютный; например `/tmp/lxd.log` для tmpfs на роутере) — `/admin/info` отдаёт фактический путь |
+| `log_file` | `<родитель state-dir>/lxd.log` | переопределение пути ротируемого лога (абсолютный; например `/tmp/lxd.log` для tmpfs на роутере; на Windows install пишет `<ProgramData>\sing-box-lxd\logs\lxd.log`, если ключа нет) — `/admin/info` отдаёт фактический путь |
 | `log_max_size_mb` | `1` | ротация лога: страховочный потолок размера |
 | `log_max_backups` | `1` | сколько старых поколений (`lxd.log.1…N`) хранить |
 | `log_max_age_hours` | `24` | ротация по возрасту файла |
@@ -141,10 +145,15 @@ connection-настроек: у команды нет флагов `--listen/--t
 | `-c <файл>` | seed-конфиг (строго один файл; каталоги `-C` не поддерживаются) |
 | `--config-force <файл>` | всегда бутиться с этого файла, поверх last-good |
 | `--run` | поднять ядро независимо от записанного run-состояния |
-| `--service install\|install-user\|uninstall` | установка службой (см. разделы ОС) |
-| `--purge` | с `uninstall` — снести и state-каталог |
-| `--dry-run` | с `--service` — показать, что было бы сделано, ничего не меняя |
-| `client add [--name <метка>]` | сминтить одноразовый инвайт для нового клиента |
+| `--service install\|install-user\|copy\|uninstall\|status` | установка службой, защищённая копия без службы, снятие, отчёт (см. разделы ОС, [7.1](#71-root-owned-копия-бинаря) и [7a](#7a-windows--автоматическая-установка)); на Windows `install`/`copy`/`uninstall` требуют повышенного токена, `install-user` — отказ |
+| `--exec-dir <dir>` | с `install`/`copy`/`uninstall`/`status` — каталог защищённой копии и её сайдкара. macOS: `sing-box-lxd`, дефолт `/Library/PrivilegedHelperTools`, должен существовать; заданный здесь создаётся. Windows: `sing-box-lxd.exe` (с `libcronet.dll`, если она лежит рядом с источником), дефолт `<ProgramFiles>\sing-box-lxd`, создаётся, если его нет |
+| `--allow-unsafe-exec` | только для отладки: служба (root-job launchd, служба SCM на Windows) стартует и с бинаря, который не защищённая копия (WARN вместо отказа) |
+| `--purge` | с `uninstall` — снести и state-каталог (Windows: весь `<ProgramData>\sing-box-lxd`, state и логи) |
+| `--keep-copy` | с `uninstall` — снять службу, защищённую копию оставить для запуска без службы ([7.1](#71-root-owned-копия-бинаря), [7a](#7a-windows--автоматическая-установка)) |
+| `--dry-run` | с `--service` (кроме `status`) — показать, что было бы сделано, ничего не меняя |
+| `--invite-out <файл>` | с `--service=install` (macOS, Windows) — записать инвайт сопряжения в этот новый файл вместо stdout; существующий файл — отказ всей команды, провал минта — выход 1 ([9](#9-сопряжение-клиента-одинаково-на-всех-ос)) |
+| `--invite-name <имя>` | с `--service=install` — имя клиента, которого сопрягает инвайт (дефолт `singbox-launcher` при `--invite-out`, без него — без имени) |
+| `client add [--name <метка>] [--invite-out <файл>]` | сминтить одноразовый инвайт для нового клиента; `--invite-out` пишет его в новый файл вместо печати |
 | `client list` / `client remove <имя-или-отпечаток>` | просмотр / отзыв доверенных клиентов |
 
 Сабкоманда существует только в сборках с тегом `with_lxd`.
@@ -170,8 +179,16 @@ connection-настроек: у команды нет флагов `--listen/--t
 включая лог ядра и паники) и ротирует по возрасту/размеру с лимитами из
 daemon.json. При ручном запуске в терминале лог остаётся на экране, файл не
 трогается. Путь к логу и state-dir клиент узнаёт из `GET /admin/info` — ничего
-хардкодить не нужно. Реализовано на macOS и Linux; на Windows — нет (как и
-служба).
+хардкодить не нужно. Реализовано на macOS, Linux и Windows.
+
+**Windows.** Лог службы — `<ProgramData>\sing-box-lxd\logs\lxd.log` (install пишет этот
+`log_file` в daemon.json), рядом с `classic.log` лаунчера. Живой файл там нельзя
+переименовать (Go открывает файлы без `FILE_SHARE_DELETE`), а писатель, держащий его,
+остался бы на старом файле, поэтому демон держит один дескриптор всю жизнь процесса:
+стандартные дескрипторы вывода и ошибок процесса указывают на него, паники рантайма тоже
+идут туда, а ротация копирует содержимое в `lxd.log.1` и усекает `lxd.log`. Строки,
+записанные между копированием и усечением, теряются. Удалить файл, пока демон жив, нельзя.
+`/admin/logs` читает `lxd.log` и `lxd.log.1`, как и на других платформах.
 
 **Каналов лога два, и несут они разное.** gRPC-поток `SubscribeLog` несёт лог
 **ядра** — то, что пишет работающий инстанс. Строки самого демона (`lxd: …`,
@@ -187,7 +204,8 @@ curl -s --cert client.pem --key client.key -k \
 
 ## 7. macOS — автоматическая установка
 
-Единственная платформа с полным `--service`. Две области:
+Полный `--service` есть на macOS и Windows ([7a](#7a-windows--автоматическая-установка));
+этот раздел — про macOS. Две области:
 
 ```bash
 sudo sing-box lxd --service=install    # системный LaunchDaemon: root, старт до логина, TUN
@@ -202,14 +220,21 @@ sing-box lxd --service=install-user    # LaunchAgent: без sudo, старт п
 
 Install делает всё сам:
 
-1. создаёт `…/Application Support/sing-box-lxd/` (0700) и `state/` внутри;
-2. **материализует daemon.json**: существующий адрес сохраняется (реинсталл не
+1. системная область: копирует бинарь в
+   `/Library/PrivilegedHelperTools/sing-box-lxd` с владельцем root,
+   и служба исполняет эту копию, а не файл, из которого её поставили
+   ([7.1](#71-root-owned-копия-бинаря));
+2. создаёт `…/Application Support/sing-box-lxd/` (0700; системная область — `root:wheel`)
+   и `state/` внутри;
+3. **материализует daemon.json**: существующий адрес сохраняется (реинсталл не
    двигает канал из-под сопряжённых клиентов), иначе первый свободный
    loopback-порт от 19091; `tls` — всегда; секрет — существующий или генерируется;
-3. пишет plist (`com.leadaxe.sing-box-lxd`) и бутстрапит службу; plist вырожден
+4. пишет plist (`com.leadaxe.sing-box-lxd`) и бутстрапит службу; plist вырожден
    до `sing-box lxd --state-dir <dir>` — все настройки в daemon.json;
-4. печатает сводку: адрес канала, админ-секрет, путь daemon.json, команду
-   рестарта — и **одноразовый инвайт** для сопряжения лаунчера.
+5. печатает отчёт status ([7.1](#71-root-owned-копия-бинаря)) и сводку: адрес канала,
+   админ-секрет, путь daemon.json, команду рестарта — и **одноразовый инвайт** для
+   сопряжения лаунчера (или, с `--invite-out`, инвайт уходит в файл —
+   [9](#9-сопряжение-клиента-одинаково-на-всех-ос)).
 
 Пути: system — `/Library/Application Support/sing-box-lxd/`, user —
 `~/Library/Application Support/sing-box-lxd/`. Лог — `lxd.log` рядом со `state/`.
@@ -217,11 +242,400 @@ Install делает всё сам:
 Прочее:
 
 ```bash
-sing-box lxd --service=install --dry-run  # показать plist и что произойдёт, ничего не трогая
+sing-box lxd --service=install --dry-run  # показать план копии, plist и что произойдёт, ничего не трогая
+sing-box lxd --service=status             # что установлено; выход 0/2/3/4 (см. 7.1), root не нужен
+sudo sing-box lxd --service=copy          # только root-owned копия, без службы (7.1)
 sing-box lxd --service=uninstall          # снять службу; state сохраняется
 sing-box lxd --service=uninstall --purge  # снять службу и снести state (клиенты, ключи, last-good)
 sing-box lxd --service=uninstall --dry-run --purge   # показать, что было бы удалено
 sudo sing-box lxd client add --name mac-book   # новый инвайт на живом демоне (state-dir найдётся сам)
+```
+
+### 7.1. Root-owned копия бинаря
+
+LaunchDaemon исполняется от root при каждой загрузке и каждом KeepAlive-рестарте. Если
+бы его plist указывал на бинарь в бандле лаунчера — файл, который может заменить
+залогиненный пользователь, — любой процесс этого пользователя получил бы исполнение
+кода от root. Поэтому системная служба никогда не исполняет файл, из которого её
+поставили; `--service=install` сначала копирует его:
+
+| Что | Путь | Владелец / режим |
+|---|---|---|
+| бинарь | `/Library/PrivilegedHelperTools/sing-box-lxd` | `root:wheel 0755` |
+| сайдкар | `/Library/PrivilegedHelperTools/sing-box-lxd.install.json` | `root:wheel 0644` |
+
+Соглашение Apple для привилегированных помощников: плоский файл, без своего каталога.
+Имя — `sing-box-lxd`, а не ярлык: macOS усекает имя процесса до 16 символов, а
+`sing-box-lxd` влезает целиком и содержит `sing-box`, так что `pgrep sing-box`, `pkill` и
+`ps -c` находят демон без `-f`. Ярлык службы, plist и `XPC_SERVICE_NAME` остаются
+`com.leadaxe.sing-box-lxd`.
+`/Library/PrivilegedHelperTools` поставляется с macOS; install его не создаёт, а его
+отсутствие — ошибка с подсказкой.
+
+- **Инвариант.** Каждый компонент пути от `/` до бинаря — настоящий каталог или файл
+  (не симлинк), принадлежит uid 0 и не имеет записи для group и other. Сам
+  `/Applications` — `root:admin 0775`, поэтому бинарь из бандла инвариант не проходит.
+- **Как встаёт копия.** Временный файл с уникальным именем в том же каталоге, fsync,
+  `chown root:wheel`, `chmod 0755`, сверка sha256 с источником, затем `rename` поверх
+  старой копии. Никогда не переписывается на месте (работающий демон держит старый
+  файл, а macOS убивает процесс, у которого меняются подписанные страницы), без xattr,
+  без переподписи. Одинаковая копия не трогается:
+  `lxd: binary unchanged (sha256 …), copy skipped`.
+- **В plist** меняется только `ProgramArguments[0]`; daemon.json, адрес, секрет и
+  сопряжённые клиенты остаются как были.
+- **Сайдкар** `sing-box-lxd.install.json` читается без root:
+  ```json
+  {
+    "source": "/Applications/singbox-launcher.app/Contents/MacOS/bin/sing-box",
+    "sha256": "…",
+    "version": "1.14.1-lx.11",
+    "installed_at": "2026-09-24T12:00:00Z",
+    "plist_path": "/Library/LaunchDaemons/com.leadaxe.sing-box-lxd.plist",
+    "label": "com.leadaxe.sing-box-lxd"
+  }
+  ```
+  `version` — версия ядра копии, видна без её запуска; `plist_path` пуст у копии без
+  службы.
+- **`--exec-dir <dir>`** кладёт оба файла с теми же именами в другой каталог; если его
+  нет, он создаётся `root:wheel 0755`. Тот же инвариант распространяется на каждый
+  компонент `<dir>` и на сам файл; иначе install отказывает:
+  `<путь>: owned by uid N, mode NNNN, must be root-owned and not group/world-writable`.
+- **Каталог на месте файла** останавливает install и copy:
+  `target is a directory (legacy layout); remove it: sudo rm -rf <путь>`. Сам он не
+  удаляется ничем; status показывает его (выход 2), uninstall оставляет с той же подсказкой.
+- **Файлы прежних сборок — не этого ядра.** `v1.14.1-lx.11` называл копию ярлыком
+  (`/Library/PrivilegedHelperTools/com.leadaxe.sing-box-lxd` и её `.install.json`), ранние
+  пре-релизы оставляли каталог с тем же именем. Текущее ядро их не читает, не переписывает
+  и не удаляет; plist, исполняющий такой файл, виден как `MISMATCH` (выход 2), пока
+  `sudo sing-box lxd --service=install` не переведёт службу на `sing-box-lxd`. Остатки
+  удалить руками: `sudo rm -rf /Library/PrivilegedHelperTools/com.leadaxe.sing-box-lxd*`.
+
+**Копия без службы.** `sudo sing-box lxd --service=copy` кладёт ту же копию и сайдкар — и
+больше ничего: ни plist, ни launchd. Это для лаунчера, который сам запускает ядро от root
+(classic TUN). Повтор с тем же бинарём ничего не меняет (`lxd: already up to date <sha256>`);
+последующий `--service=install` привязывает эту копию к plist без повторного копирования.
+Обновление ядра — снова `--service=copy` (и `--service=install`, если служба есть) из
+нового бинаря; ядро само обновлений не отслеживает.
+
+**Status** не требует root и ничего не меняет:
+
+```bash
+sing-box lxd --service=status; echo "exit $?"
+```
+
+Для LaunchDaemon (а без него — для копии) и для user-агента печатает plist, программу,
+которую он исполняет, владельца и режим, проходит ли инвариант, sha256 программы против
+sha256 этого бинаря, сайдкар и состояние и pid из `launchctl print`. Последняя строка —
+вердикт:
+
+| Вердикт | Значение | Выход |
+|---|---|---|
+| `OK` | служба исполняет root-owned копию ровно этого бинаря | 0 |
+| `MISMATCH` | нужна переустановка: другой бинарь, сайдкара нет или он чужой, копию поменяли в обход сайдкара, сайдкар без копии | 2 |
+| `UNSAFE` | программа или каталог над ней не проходит инвариант | 2 |
+| `NOT INSTALLED` | нет ни plist, ни копии | 3 |
+| `COPY ONLY` | исправная копия этого бинаря, службы нет | 4 |
+| `NOT RUNNING` | на диске всё исправно, но у launchd нет работающего job'а этого ярлыка (bootstrap упал или был только bootout); в причине — команда `launchctl bootstrap` | 5 |
+
+**Uninstall** удаляет копию и сайдкар, только если сайдкар относится к этой службе (или ни
+к какому plist) и sha256 файла по-прежнему равен записанному; иначе файл остаётся, а
+причина печатается (`lxd: copy left in place: …`). Произвольный `ProgramArguments[0]` не
+удаляется никогда.
+
+`sudo sing-box lxd --service=uninstall --keep-copy` снимает plist и job launchd, но копию и
+сайдкар оставляет, а `plist_path` в сайдкаре очищает — состояние «только копия» (status
+`COPY ONLY`, выход 4):
+`lxd: copy kept for non-service use: <путь>; remove with --service=uninstall without --keep-copy`.
+`--purge` по-прежнему только про state. Без установленной службы и с уже отвязанной копией
+ничего не меняет, печатает ту же строку и выходит с 0.
+
+**Самопроверка при старте.** Ядро, запущенное от root (`lxd` или `run`), проверяет
+собственный бинарь инвариантом. Job launchd — родитель pid 1 и
+`XPC_SERVICE_NAME=com.leadaxe.sing-box-lxd` — отказывается стартовать и пишет причину в
+`lxd.log`:
+
+```
+lxd: refusing to run as a root service from /Applications/…/sing-box (uid 501, mode 0755): /Applications: owned by uid 0, mode 0775, must be root-owned and not group/world-writable; run `sing-box lxd --service=install` to reinstall from a root-owned copy
+```
+
+Любой другой запуск от root — sudo из терминала, nohup, лаунчер, поднимающий ядро с
+правами, — только пишет WARN с тем же путём, владельцем и режимом.
+`lxd --allow-unsafe-exec` превращает отказ в WARN для отладки. Пройденная проверка в
+job'е launchd — одна строка INFO:
+`lxd: self-check ok: root-owned /Library/PrivilegedHelperTools/sing-box-lxd, launchd service com.leadaxe.sing-box-lxd`.
+
+> ⚠️ **Обновление системной установки, сделанной старым ядром.** Её plist исполняет
+> бинарь из бандла. Как только этот бинарь обновится до этой версии, ближайший рестарт
+> службы откажет в старте (см. выше). Один раз переустановить:
+> `sudo sing-box lxd --service=install` — daemon.json, клиенты и ключи сохраняются.
+
+**Ручная проверка:**
+
+```bash
+ls -ld / /Library /Library/PrivilegedHelperTools
+ls -l /Library/PrivilegedHelperTools/sing-box-lxd*                         # root wheel -rwxr-xr-x бинарь, -rw-r--r-- .install.json
+plutil -p /Library/LaunchDaemons/com.leadaxe.sing-box-lxd.plist            # ProgramArguments[0] = копия
+shasum -a 256 /Library/PrivilegedHelperTools/sing-box-lxd
+cat /Library/PrivilegedHelperTools/sing-box-lxd.install.json               # тот же sha256
+pgrep -l sing-box                                                          # демон виден как sing-box-lxd
+launchctl print system/com.leadaxe.sing-box-lxd | grep -E '^[[:space:]](state|pid|program) ='
+sing-box lxd --service=status
+```
+
+## 7a. Windows — автоматическая установка
+
+На Windows `--service` ставит службу диспетчера служб (SCM) с именем `sing-box-lxd`:
+учётная запись `LocalSystem`, автозапуск при загрузке (до входа пользователя), зависимость
+от `Tcpip`. Модель та же, что на macOS ([7.1](#71-root-owned-копия-бинаря)): служба никогда
+не исполняет файл, из которого её поставили, — только защищённую копию.
+
+```powershell
+# PowerShell «Запуск от имени администратора» для всего, кроме status и --dry-run
+sing-box lxd --service=install                  # служба, защищённая копия, daemon.json, инвайт
+sing-box lxd --service=install --dry-run        # план: каталог данных, копия, BinaryPathName; ничего не трогает
+sing-box lxd --service=status                   # без повышения; выход 0/2/3/4/5, 1 при ошибке (см. ниже)
+sing-box lxd --service=copy                     # только защищённая копия, SCM не трогается (7a.1)
+sing-box lxd --service=uninstall                # снять службу и её копию; state и логи сохраняются
+sing-box lxd --service=uninstall --keep-copy    # снять службу, копию оставить (status COPY ONLY)
+sing-box lxd --service=uninstall --purge        # снести и <ProgramData>\sing-box-lxd (state и логи)
+sing-box lxd --service=install --invite-out C:\Users\me\invite.txt   # инвайт в новый файл (9)
+sing-box lxd client add --name office-pc        # новый инвайт на живом демоне (state-dir найдётся сам)
+```
+
+`install`, `copy` и `uninstall` требуют повышенного токена; без него отказывают до любых
+изменений (`--service=install needs an elevated token (run as administrator)`). `status` и
+`--dry-run` работают из обычной консоли. `--service=install-user` здесь нет:
+`--service=install-user is not supported on Windows; use --service=install`. `--exec-dir <dir>`
+переносит копию в другой каталог, как на macOS; `status` и `uninstall` такой установки
+нужно запускать с тем же флагом.
+
+Пути (корни берутся из известных папок `ProgramFiles` и `ProgramData`; `C:\` — только
+обычное значение):
+
+| Что | Путь | Владелец / DACL |
+|---|---|---|
+| каталог копии | `<ProgramFiles>\sing-box-lxd\` | Administrators; `D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;AU)` |
+| бинарь | `…\sing-box-lxd\sing-box-lxd.exe` | Administrators; `D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FRFX;;;AU)` |
+| библиотека | `…\sing-box-lxd\libcronet.dll` — только если лежит рядом с исходным бинарём | как у бинаря |
+| сайдкар | `…\sing-box-lxd\sing-box-lxd.install.json` | как у бинаря |
+| каталог данных | `<ProgramData>\sing-box-lxd\` | Administrators; `D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)` |
+| state | `<ProgramData>\sing-box-lxd\state\` — daemon.json, TLS-пара, клиенты, `resources`, `tailscale` | SYSTEM или Administrators, доступ только SYSTEM и Administrators |
+| логи | `<ProgramData>\sing-box-lxd\logs\` — `lxd.log`, `lxd.log.1`; туда же лаунчер пишет свой `classic.log` | как у state |
+
+Authenticated Users могут читать и исполнять копию (лаунчер без прав считает её хеш и
+читает сайдкар), но не писать в неё. Каталог данных закрыт для всех, кроме SYSTEM и
+Administrators. `wintun.dll` в копию не входит: `sing-tun` встраивает его и загружает из
+памяти.
+
+Что делает `--service=install`, по шагам:
+
+1. Проверяет токен; с `--invite-out` существующий файл отменяет всю команду до любых
+   изменений.
+2. **Забирает каталог данных** до любой записи в него — daemon.json несёт секрет, а файл,
+   созданный под чужим владельцем, унаследовал бы чужой DACL. Включив
+   `SeTakeOwnershipPrivilege` и `SeRestorePrivilege`, обходит `<ProgramData>\sing-box-lxd`
+   сверху вниз, каждое звено — через дескриптор, открытый без следования ссылкам: корень
+   получает владельца Administrators и защищённый DACL из таблицы; узел ниже, выбившийся из
+   нормы, — владельца Administrators и собственный явный защищённый DACL (каталоги —
+   наследуемый, файлы — `D:P(A;;FA;;;SY)(A;;FA;;;BA)`). Файлы, созданные демоном под SYSTEM
+   с унаследованными записями, в норме и остаются как есть. По строке на каждое изменённое
+   звено — `lxd: took ownership of <путь> (was <имя> (<SID>))`, `lxd: replaced DACL on <путь>`
+   — или одна строка `lxd: data dir <путь> is protected`. `state\` и `logs\` создаются, если
+   их нет. `classic.log` лаунчера получает тот же DACL; своё чтение лаунчер восстанавливает
+   на ближайшем повышенном старте. Reparse point или файл с несколькими жёсткими ссылками
+   внутри — отказ (`<путь> is a reparse point; remove it: Remove-Item <путь>`): смена ACL
+   через ссылку поменяла бы чужой объект. Сам install такое не удаляет.
+3. **daemon.json** — как на macOS: существующий адрес сохраняется, иначе первый свободный
+   loopback-порт от 19091; `tls: true`; секрет сохраняется или генерируется. Если в файле нет
+   `log_file`, install пишет `<ProgramData>\sing-box-lxd\logs\lxd.log`.
+4. Работающая служба останавливается с ожиданием `STOPPED` до 30 с
+   (`lxd: stopping service sing-box-lxd (Ns)`); не остановилась — install падает, ничего не
+   изменено.
+5. Набор файлов и сайдкар встают в каталог копии ([7a.1](#7a1-защищённая-копия-набора)).
+6. Служба создаётся или обновляется: `BinaryPathName` — путь копии в кавычках плюс
+   `lxd --state-dir <abs>` (и `-c`/`--config-force`/`--run`, если заданы, как на macOS);
+   `LocalSystem`, автозапуск, зависимость `Tcpip`; восстановление — три рестарта через 5 с,
+   сброс счётчика через 86400 с, в том числе когда служба останавливается с ненулевым кодом.
+   DACL службы — `D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x2008d;;;AU)`: Authenticated Users могут
+   читать конфигурацию и состояние, но не запускать, не останавливать, не перенастраивать и
+   не забирать службу.
+7. Запуск с ожиданием `RUNNING` до 30 с. Служба, остановившаяся при запуске, — ошибка с её
+   кодами выхода; причина — в `lxd.log`.
+8. Отчёт status; вердикт не `OK` — install завершается ошибкой (выход 1).
+9. Сводка: адрес канала, админ-секрет, путь daemon.json,
+   `restart command: Restart-Service sing-box-lxd (PowerShell as administrator)` и
+   одноразовый инвайт — в stdout или в файл `--invite-out`.
+
+Если после остановки на шаге 4 не удались копия или конфигурация службы, install
+возвращает прежний образ, запускает службу на нём и только потом отдаёт ошибку
+(`lxd: install failed, previous service image restarted`): неудачное обновление не оставляет
+хост без VPN. Повторный install с тем же бинарём файлы не трогает
+(`lxd: binary set unchanged (…), copy skipped`), daemon.json, секрет и клиентов сохраняет и
+перезапускает службу — VPN коротко моргает.
+
+`Restart-Service`, а не `sc.exe stop` + `sc.exe start`: `sc.exe stop` не ждёт остановки, и
+`start` падает с ошибкой 1056, пока служба в `STOP_PENDING`. Install сразу после uninstall
+при открытой оснастке «Службы» (`services.msc`) может получить
+`ERROR_SERVICE_MARKED_FOR_DELETE` (1072); закрыть оснастку или перезагрузиться и повторить.
+
+Если install забрал владение у учётной записи вне SYSTEM, Administrators и TrustedInstaller
+или такая запись могла читать `state\`, а daemon.json уже был, секрет и серверная пара не
+перегенерируются (лаунчер хранит секрет, а новая пара рассопрягла бы всех клиентов). Install
+печатает `WARN: <путь> was readable by <имя> (<SID>) before this install; rotate the admin
+secret in daemon.json and re-pair clients if the host is shared` и кладёт тот же текст в
+сайдкар (`warnings`): у лаунчера, запускающего install через `runas`, консоли нет.
+
+**Status** не требует повышения и ничего не меняет. Открывает SCM с `SC_MANAGER_CONNECT`, а
+службу — только с правами запроса, и печатает три блока: `[service]` (имя, `BinaryPathName`
+и его argv[0], тип старта, учётная запись, состояние, pid, защищён ли DACL службы), `[copy]`
+(каталог, инвариант цепочки, владелец и sha256 каждого файла против набора вызывающего,
+лишние файлы, остатки, сайдкар с предупреждениями) и `[data dir]` (владелец и защищён ли
+DACL; без прав администратора он обычно не читается, это норма — только для сведения).
+Последняя строка — вердикт:
+
+| Вердикт | Значение | Выход |
+|---|---|---|
+| `OK` | служба исполняет каноническую копию, DACL службы и инвариант в порядке, сайдкар привязан к `sing-box-lxd`, файлы = сайдкар = набор вызывающего бинаря, лишних файлов нет, состояние `RUNNING` | 0 |
+| `MISMATCH` | инвариант соблюдён, но: набор отличается от набора вызывающего (в том числе `libcronet.dll` есть только с одной стороны); сайдкара нет или он чужой; файл не совпадает с сайдкаром; сайдкар называет отсутствующий файл; сайдкар привязан к несуществующей службе; лишний файл в каталоге копии | 2 |
+| `UNSAFE` | конфигурация службы не читается (в том числе отказ в доступе); `BinaryPathName` не разбирается; argv[0] — не каноническая копия; путь с пробелом без кавычек; DACL службы даёт чужой учётной записи `SERVICE_CHANGE_CONFIG`, `WRITE_DAC`, `WRITE_OWNER`, `DELETE`, `GENERIC_WRITE` или `GENERIC_ALL`; цепочка или набор нарушают инвариант | 2 |
+| `NOT INSTALLED` | нет ни службы, ни копии, ни сайдкара | 3 |
+| `COPY ONLY` | службы нет; копия проходит инвариант, её сайдкар с `service: ""`, файлы = сайдкар = набор вызывающего | 4 |
+| `NOT RUNNING` | всё как у `OK`, но состояние не `RUNNING` (включая `START_PENDING`); в причине — `sc.exe start sing-box-lxd` (от администратора) или `--service=install` | 5 |
+| ошибка | SCM не открылся, вызывающий бинарь не читается | 1 |
+
+В отличие от macOS, служба, чей argv[0] — не каноническая копия, получает `UNSAFE`, а не
+`MISMATCH`. Набор вызывающего — его `.exe` и `libcronet.dll` рядом, если есть; пути
+сравниваются без учёта регистра.
+
+**Uninstall** останавливает и удаляет службу (`lxd: uninstalled service sing-box-lxd`), затем
+смотрит в два места: каталог argv[0] службы (если файл называется `sing-box-lxd.exe`) и
+каталог копии. Набор там удаляется, только если сайдкар есть, его `service` — `sing-box-lxd`
+или пусто, и sha256 каждого файла равен сайдкару; одно расхождение — не удаляется ничего, с
+причиной (`lxd: copy left in place: …`). Остатки уходят вместе с набором; дефолтный
+`<ProgramFiles>\sing-box-lxd` удаляется, если опустел, каталог из `--exec-dir` остаётся.
+`--keep-copy` снимает только службу и переписывает сайдкар с `service: ""`
+(`lxd: copy kept for non-service use: <путь>; remove with --service=uninstall without --keep-copy`).
+`--purge` сносит и весь `<ProgramData>\sing-box-lxd`, включая `classic.log` лаунчера.
+`--dry-run` печатает те же решения со словом `would`.
+
+**Логи.** Демон пишет `logs\lxd.log`, ротация — копированием (см. [6](#6-логи)). События
+самой службы (старт, остановка, код выхода) — в системном журнале событий, их пишет SCM;
+демон Event Log не использует. Ошибка до открытия лога (не читается daemon.json) видна там
+только как код выхода 1.
+
+**Под SCM** демон сообщает `START_PENDING`, читает daemon.json, забирает лог, выполняет
+самопроверку, переходит рабочим каталогом в state-каталог (относительные пути конфига вроде
+`cache.db` разрешаются там, а не в `System32`) и сразу сообщает `RUNNING`: управляющий канал
+и так поднимается первым, а бутстрап ядра может идти дольше таймаута старта SCM. Остановка
+или выключение отменяют демон и ждут его 10 с; дальше процесс пишет строку в лог и выходит
+с кодом 1. Канал — тот же TCP loopback + mTLS, что и на других платформах; named pipe нет.
+
+С `v1.14.2-lx.2-rc.3` служба запускает демон на контексте ядра, как и консольный запуск (в
+rc.1/rc.2 первый `/admin/apply` под SCM падал в панику, клиент видел EOF); паника в
+обработчике admin REST или gRPC пишется в `lxd.log` со стеком.
+
+Сборки для Windows 7 (`windows-386-legacy-windows-7`) идут без `with_lxd`: там нет ни `lxd`,
+ни службы.
+
+### 7a.1. Защищённая копия набора
+
+- **Инвариант.** Каждый компонент от корня тома до родителя каталога копии принадлежит
+  SYSTEM, Administrators или TrustedInstaller, и никакая другая учётная запись не имеет на
+  нём `DELETE`, `WRITE_DAC`, `WRITE_OWNER`, `GENERIC_WRITE`, `GENERIC_ALL` или
+  `FILE_DELETE_CHILD` (создавать папки в `C:\` можно — подменить наш путь это не даёт).
+  Каталог копии и каждый файл набора принадлежат SYSTEM или Administrators, и чужой записи
+  нет вовсе. Каждый компонент открывается без следования ссылкам, владелец и DACL читаются с
+  этого дескриптора; reparse point в любом звене, NULL DACL или разрешающая запись
+  неизвестного типа (object, callback) — нарушение. Том — фиксированный диск NTFS. Сообщения
+  называют путь и учётную запись: `<путь>: owner <имя> (<SID>) is not SYSTEM, Administrators
+  or TrustedInstaller` (для самой копии — `is not SYSTEM or Administrators`),
+  `<путь>: <имя> (<SID>) is granted <права>, must not be writable by a non-administrative
+  principal`, `<путь>: is a reparse point, must be a real file or directory`,
+  `<путь>: not on a fixed NTFS volume`.
+- **Набор.** `os.Executable()` с разрешёнными ссылками (обычный файл, не больше 512 МиБ)
+  плюс `libcronet.dll` из того же каталога, если он есть. Копия всегда называется
+  `sing-box-lxd.exe`.
+- **Как встаёт набор.** Сначала проверяются предки (нарушение — отказ до любых изменений);
+  каталог копии создаётся со своим DACL или приводится к нему. Остатки прошлого прогона
+  (`<член набора>.old`, `.<член набора>.tmp-<hex>`) удаляются; занятый остаток ждёт
+  следующего install (`lxd: <путь> is still in use, left for the next install`). Файл,
+  названный в прошлом сайдкаре и выпавший из набора (`libcronet.dll` прежней сборки),
+  удаляется; незнакомый файл — отказ:
+  `<путь>: unknown file in the copy directory; remove it: Remove-Item <путь>`. Каждый
+  изменившийся член набора идёт через временный файл в том же каталоге: запись, сброс на
+  диск, DACL, сверка sha256 с источником; затем старый файл переименовывается в
+  `<имя>.old`, временный встаёт на место, `.old` удаляется. Перезаписи на месте нет:
+  исполняемый образ нельзя открыть на запись, но можно переименовать. Одинаковый набор не
+  трогается: `lxd: binary set unchanged (sha256 <exe>[, libcronet.dll <hex>]), copy skipped`.
+- **Сайдкар** `sing-box-lxd.install.json` пишется после набора, временным файлом и
+  `rename`, читается без повышения. Структура отличается от macOS:
+  ```json
+  {
+    "source": "C:\\Users\\u\\AppData\\Local\\singbox-launcher\\bin\\sing-box.exe",
+    "version": "1.14.2-lx.2",
+    "installed_at": "2026-09-24T12:00:00Z",
+    "service": "sing-box-lxd",
+    "files": [
+      {"name": "sing-box-lxd.exe", "sha256": "…"},
+      {"name": "libcronet.dll", "sha256": "…"}
+    ],
+    "warnings": [
+      {"code": "state_dir_foreign_before_install", "text": "WARN: … before this install; …"}
+    ]
+  }
+  ```
+  `service` — служба SCM, к которой привязана копия, `""` — копия без службы. `files` —
+  весь набор с sha256 каждой копии. `warnings` — то, о чём предупредили последние install
+  или copy; нет поля или пустой массив — предупреждений нет, каждый прогон переписывает
+  поле. Пока единственный код — `state_dir_foreign_before_install`. Если файлы, привязка и
+  предупреждения не изменились, сайдкар не переписывается (`lxd: already up to date <sha256>`).
+  При установке из самой копии `source` сохраняется прежний.
+- **Копия без службы.** `--service=copy` забирает каталог данных и кладёт набор и сайдкар;
+  SCM не трогается. Сайдкар получает `service: ""`, если только он не был привязан к
+  существующей службе `sing-box-lxd` — тогда привязка сохраняется. Работающая служба
+  исполняет старый образ до рестарта (`lxd: the service still runs the previous image until
+  restarted`). Повтор с тем же бинарём ничего не меняет. Это для лаунчера, который сам
+  запускает ядро с правами.
+- **Самопроверка при старте.** Ядро с повышенным токеном (`lxd` или `run`) проверяет
+  собственный бинарь инвариантом: цепочку над его каталогом, каталог, бинарь и
+  `libcronet.dll` рядом. `lxd`, запущенный SCM, при нарушении отказывается стартовать,
+  причина — в `lxd.log`, код выхода 1:
+  ```
+  lxd: refusing to run as a Windows service from <бинарь> (owner <имя> (<SID>)): <нарушение>; run `sing-box lxd --service=install` to reinstall from a protected copy
+  ```
+  Любой другой повышенный запуск — `lxd` вне SCM, `run` (в том числе classic лаунчера) — и
+  `lxd --allow-unsafe-exec` только пишут WARN; процесс без повышения не проверяется.
+  Пройденная проверка под SCM — одна строка INFO:
+  `lxd: self-check ok: protected <путь>, windows service sing-box-lxd`.
+- **Поиск DLL.** Любая сборка с `with_lxd` на Windows ограничивает поиск DLL, загружаемых
+  без полного пути, каталогом приложения и `System32` (`SetDefaultDllDirectories`), чтобы
+  привилегированное ядро не подхватило библиотеку, подложенную в рабочий каталог или в
+  доступный пользователю на запись каталог `PATH`. Сама `libcronet.dll` грузится лениво по
+  полному пути — из каталога exe, затем из каталогов `PATH`; если в наборе нет
+  `libcronet.dll`, служба и повышенный `run` на старте закрепляют загрузку за каталогом exe,
+  и naive-outbound получает ошибку загрузки вместо поиска по `PATH` под SYSTEM.
+
+Не покрыто: подпись Authenticode копии не проверяется и не ставится; одновременные
+install/copy с разными бинарями друг от друга не блокируются (status покажет `MISMATCH`,
+повтор команды чинит); предков `<ProgramData>` ядро не проверяет.
+
+### 7a.2. Ручная проверка
+
+Из PowerShell (`icacls` и `Get-Acl` каталога данных требуют прав администратора):
+
+```powershell
+sc.exe qc sing-box-lxd                     # BINARY_PATH_NAME = "C:\Program Files\sing-box-lxd\sing-box-lxd.exe" lxd --state-dir …, AUTO_START, LocalSystem, DEPENDENCIES Tcpip
+sc.exe qfailure sing-box-lxd               # RESTART -- Delay = 5000 milliseconds (три раза), RESET_PERIOD 86400
+sc.exe sdshow sing-box-lxd                 # D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x2008d;;;AU)
+sc.exe query sing-box-lxd                  # STATE 4 RUNNING
+icacls "C:\Program Files\sing-box-lxd"     # SYSTEM:(OI)(CI)(F), Administrators:(OI)(CI)(F), Authenticated Users:(OI)(CI)(RX); без унаследованных записей
+icacls "C:\Program Files\sing-box-lxd\sing-box-lxd.exe"
+(Get-Acl "C:\Program Files\sing-box-lxd\sing-box-lxd.exe").Owner   # BUILTIN\Administrators
+icacls C:\ProgramData\sing-box-lxd /t      # только SYSTEM и Administrators (плюс собственная запись лаунчера на classic.log)
+Get-FileHash "C:\Program Files\sing-box-lxd\sing-box-lxd.exe"      # SHA256, сверить с сайдкаром
+Get-Content "C:\Program Files\sing-box-lxd\sing-box-lxd.install.json"
+Get-Content C:\ProgramData\sing-box-lxd\logs\lxd.log -Tail 50
+sing-box lxd --service=status; "exit $LASTEXITCODE"
 ```
 
 ## 8. Linux — подходы к настройке
@@ -368,12 +782,34 @@ fail-closed) — [openwrt-vpn-ssid.ru.md](openwrt-vpn-ssid.ru.md).
 ## 9. Сопряжение клиента (одинаково на всех ОС)
 
 1. На хосте демона: `sing-box lxd client add --name <метка>` (на macOS с
-   системной службой — под sudo). Печатается одноразовый инвайт
-   `адрес#отпечаток#код`.
+   системной службой — под sudo, на Windows — от администратора; без повышения
+   там будет `cannot read <путь>: access denied — run as administrator`).
+   Печатается одноразовый инвайт `адрес#отпечаток#код`.
 2. Инвайт вставляется в лаунчер: тот пинит сервер по отпечатку, регистрируется
    кодом (`POST /admin/enroll`), получает доверие по своему сертификату. Код
    сгорает.
 3. Проверка/отзыв: `client list`, `client remove <имя-или-отпечаток>`.
+
+**Имя клиента.** `--name`, `--invite-name` и поле `name` в `POST /admin/client-code`
+обрезаются по краям от пробелов и дальше должны быть пустыми (без имени) или от 1 до 64
+печатных символов; иначе команда отказывает, а маршрут отвечает 400 `client name: …`.
+Инвайт с именем при погашении **заменяет** сопряжённого клиента с тем же именем: старый
+сертификат отзывается, новый занимает его место, так что лаунчер, сопрягающийся заново на
+каждом install, не копит записи. Инвайт без имени добавляет клиента, как раньше.
+
+**Инвайт в файл.** `client add --invite-out <файл>` и `--service=install --invite-out <файл>`
+пишут строку инвайта (`адрес#отпечаток#код` и перевод строки) в новый файл вместо печати и
+печатают `lxd: invite written to <файл>`. Файл создаётся до минта и эксклюзивно: на Unix —
+`O_CREAT|O_EXCL|O_NOFOLLOW`, режим 0600; на Windows — `CREATE_NEW`, после чего итоговый путь
+открытого файла обязан совпасть с запрошенным (короткое имя 8.3 в запросе допустимо;
+junction на пути — отказ, файл удаляется). Существующий файл отменяет команду до любых
+изменений. Install ждёт минта от демона до 15 с; не дождался — с `--invite-out` выходит с
+кодом 1 (служба остаётся установленной, файл удаляется): лаунчер судит по коду выхода. С
+`--invite-out` install называет клиента `singbox-launcher`, если `--invite-name` не задаёт
+другое; без `--invite-out` имя — из `--invite-name` или никакого.
+`--service=install --invite-out` требует платформы, где install действительно ставит службу
+(macOS, Windows), и на Linux, где install печатает рецепт, — отказ; `client add --invite-out`
+работает везде.
 
 **Грабли сопряжения по сети** (проверено на роутере — три неудачные попытки):
 
@@ -445,7 +881,9 @@ fail-closed) — [openwrt-vpn-ssid.ru.md](openwrt-vpn-ssid.ru.md).
    ```
 
    Успех — `{"enrolled":true,"name":…,"fingerprint":…}`. Метка из
-   `client add --name` побеждает `name` из запроса. Код сгорает при успехе;
+   `client add --name` побеждает `name` из запроса, и такой именной код заменяет
+   сопряжённого клиента с тем же именем (см. [9](#9-сопряжение-клиента-одинаково-на-всех-ос)).
+   Код сгорает при успехе;
    активен всегда только один код (новый минт заменяет старый).
 
 4. **Всё после enrollment — mTLS этим сертификатом**: он — полная credential
@@ -474,7 +912,7 @@ fail-closed) — [openwrt-vpn-ssid.ru.md](openwrt-vpn-ssid.ru.md).
 | `POST /admin/start` · `POST /admin/stop` | жизнь ядра отдельно от конфига (stop запоминается) |
 | `GET /admin/config` | активный конфиг |
 | `GET /admin/status` | `idle\|started\|fatal`, sha активного/last-good, `last_error`, `interrupted_apply` |
-| `GET /admin/info` | паспорт: версия, state_dir, listen, tls, отпечаток, pid, uptime, log_path |
+| `GET /admin/info` | паспорт: версия, state_dir, listen, tls, отпечаток, pid, uptime, log_path, `executable` и `executable_sha256` (работающий бинарь — ядра сравниваются по хешу, не по пути; хеш считается один раз при старте, первые мгновения — `""`) |
 | `POST /admin/enroll` | регистрация клиента по одноразовому коду |
 | `GET /admin/resources` · `PUT`/`GET`/`DELETE /admin/resources/{имя}` | файлы, на которые **ссылается** конфиг (`.srs`, geo-базы): список с sha256, заливка, выгрузка, удаление; 409, пока на имя ссылается активный или last-good конфиг |
 | `GET /admin/memory` | память процесса: heap/stack/sys, горутины, GC и **два** числа RSS — `rss_current_bytes` и `rss_peak_bytes` (сырые байты; пик не убывает, поэтому отдаётся отдельно от текущего) |

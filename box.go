@@ -190,6 +190,14 @@ func New(options Options) (*Box, error) {
 		return nil, E.Cause(err, "create log factory")
 	}
 	service.MustRegister[log.Factory](ctx, logFactory)
+	// lx:begin lx-block
+	// SPEC 098 — resolve the root `lx` block into the context before the router
+	// and every node are created.
+	ctx, err = applyLXOptions(ctx, &options.Options, logFactory.NewLogger("lx"))
+	if err != nil {
+		return nil, err
+	}
+	// lx:end lx-block
 
 	var internalServices []adapter.LifecycleService
 	routeOptions := common.PtrValueOrDefault(options.Route)
@@ -230,13 +238,13 @@ func New(options Options) (*Box, error) {
 	}
 	service.MustRegister[adapter.DNSRouter](ctx, dnsRouter)
 	service.MustRegister[adapter.DNSRuleSetUpdateValidator](ctx, dnsRouter)
+	connectionManager := route.NewConnectionManager(logFactory.NewLogger("connection"))
+	service.MustRegister[adapter.ConnectionManager](ctx, connectionManager)
 	networkManager, err := route.NewNetworkManager(ctx, logFactory.NewLogger("network"), routeOptions, dnsOptions)
 	if err != nil {
 		return nil, E.Cause(err, "initialize network manager")
 	}
 	service.MustRegister[adapter.NetworkManager](ctx, networkManager)
-	connectionManager := route.NewConnectionManager(logFactory.NewLogger("connection"))
-	service.MustRegister[adapter.ConnectionManager](ctx, connectionManager)
 	// Must register after ConnectionManager: the Apple HTTP engine's proxy bridge reads it from the context when Manager.Start resolves the default client.
 	httpClientManager := httpclient.NewManager(ctx, logFactory.NewLogger("httpclient"), options.HTTPClients, routeOptions.DefaultHTTPClient)
 	service.MustRegister[adapter.HTTPClientManager](ctx, httpClientManager)
