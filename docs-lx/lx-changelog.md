@@ -28,6 +28,40 @@ required for stable tags); this changelog section is the fallback used for pre-r
 > тогда. Пользовательские ноты билингвальны там, где это важно, — в
 > [`releases/`](releases/).
 
+#### v1.14.2-lx.4
+
+Поверх `v1.14.2-lx.3`. База — sing-box `v1.14.2`.
+
+- ✨ **Ручной переключатель WG/AWG-endpoint'а** — gRPC `SetEndpointEnabled(tag, enabled)` в блоке
+  `lx_command`. Выключение усыпляет узел механизмом SPEC 020 (установленные потоки рвутся) и отвергает
+  дайлы, UDP-listen и L3-форвард ошибкой `WireGuard endpoint is disabled`; включение будит спящий узел
+  сразу, разобранный или несобранный собирает следующий дайл через бюджет. Новое состояние `disabled`
+  в `GroupItem.endpointState` (`GetOutbounds`), ответ RPC несёт состояние после вызова. Коды:
+  `NotFound`, `InvalidArgument` (не WG/AWG), `FailedPrecondition` (ядро не запущено, узел закрывается),
+  `Unavailable` (пробуждение не удалось). Не сохраняется: reload включает все узлы. Ядро без тега,
+  работает и на десктопе. LxBox: `CommandClient.SetEndpointEnabled(tag, enabled)` → `EndpointToggleResult`
+  с полем `State`.
+  ([SPEC 106](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/106-WG_ENDPOINT_TOGGLE/SPEC.md))
+- 🧰 **OpenWrt-инсталлятор 1.2** — `GOMEMLIMIT` = MemTotal/3 (64..512 МиБ) и `GOGC=50` в init-скрипт procd
+  службы `lxd`; oom-killer ядра реагирует только у `memory_limit`, GC должен держать кучу заранее.
+- 📄 `SECURITY.md` — приватный канал для сообщений об уязвимостях.
+
+#### v1.14.2-lx.3
+
+Хотфикс поверх `v1.14.2-lx.2`. Пользовательские ноты (EN+RU):
+[`docs-lx/releases/v1.14.2-lx.3.md`](releases/v1.14.2-lx.3.md). База — sing-box `v1.14.2`, дрейфа от
+`upstream/stable` нет, зависимости с lx.2 не менялись.
+
+- 🐛 **VLESS: Vision поверх VLESS-шифрования** — `flow: xtls-rprx-vision` вместе с `encryption` падал с
+  `vision: not a valid supported TLS connection: *encryption.CommonConn`. Новый файл
+  `protocol/vless/encryption/lx_vision.go` добавляет `*CommonConn` в закрытый реестр TLS-conn'ов Vision
+  из sing-vmess (`//go:linkname` на `vless.tlsRegistry`): Vision читает `input`/`rawInput` слоя, прямое
+  копирование идёт в conn под слоем, как `UnwrapRawConn` в Xray. Транспорт любой, XHTTP тоже. Страж-тест
+  ловит переименование реестра при бампе sing-vmess. Стенд: живые узлы `tcp`+REALITY и `xhttp`+REALITY —
+  204 и 20 МБ по HTTPS. ([#29](https://github.com/Leadaxe/sing-box-lx/issues/29),
+  [SPEC 105](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/105-VISION_OVER_VLESS_ENCRYPTION/SPEC.md))
+- 📝 `lx-protocols-transports`: Vision поверх XHTTP работает только вместе с `encryption`.
+
 #### v1.14.2-lx.2-rc.3
 
 Пререлиз линии `v1.14.2-lx.2`; подробности — в секции `v1.14.2-lx.2` ниже.
@@ -46,6 +80,30 @@ required for stable tags); this changelog section is the fallback used for pre-r
 
 #### v1.14.2-lx.2
 
+Стабильный релиз линии `v1.14.2-lx.2` — сводит rc.1–rc.3, код = rc.3. Пользовательские ноты (EN+RU):
+[`docs-lx/releases/v1.14.2-lx.2.md`](releases/v1.14.2-lx.2.md). База — sing-box `v1.14.2`, дрейфа от
+`upstream/stable` нет.
+
+**Что вошло:**
+
+- 🪟 **lxd: служба Windows `sing-box-lxd`** — `--service=install|copy|status|uninstall`; служба SCM (`LocalSystem`,
+  автозапуск до входа пользователя, recovery) исполняет защищённую копию `<ProgramFiles>\sing-box-lxd\` (exe +
+  `libcronet.dll`), а не файл, из которого её поставили; данные — `<ProgramData>\sing-box-lxd\state\` и `…\logs\`
+  (`lxd.log`), каталог захватывается до записи секрета. Install со stop → замена копии → configure → start и откатом на
+  прежнюю копию при провале; status с кодами 0 `OK` / 2 `MISMATCH`·`UNSAFE` / 3 / 4 / 5 / 1; сайдкар
+  `sing-box-lxd.install.json` с `files[]` и `warnings[]` (совет сменить секрет, если каталог был доступен чужому SID).
+- 🐛 **Служба Windows на контексте ядра** (rc.3) — в rc.1/rc.2 первый `/admin/apply` под SCM паниковал, клиент видел EOF.
+- 📝 **Паники admin REST и gRPC — в лог демона** со стеком, ответ JSON 500 / `codes.Internal`; на Windows stdlib `log`
+  тоже в `lxd.log`.
+- 🎟 **`--invite-out` / `--invite-name`** у `--service=install` (macOS, Windows) и `client add --invite-out` — инвайт в
+  новый файл, существующий — отказ до изменений; имя по умолчанию `singbox-launcher`.
+- 🏷 **Имя клиента** — после обрезки пробелов пусто или 1–64 печатных символа (`400 client name: …`); enroll по именному
+  инвайту заменяет клиента с тем же именем.
+- ✨ **XHTTP: версия HTTP по `tls.alpn`, как у Xray** — `["h3"]` → HTTP/3 по QUIC, `["http/1.1"]` и без TLS → HTTP/1.1
+  (было h2c), REALITY → HTTP/2, иначе HTTP/2; новых ключей нет.
+
+**Подробности:**
+
 - 🪟 **lxd: служба Windows (SCM) с защищённой копией ядра**
   ([SPEC 103](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/103-LXD_WINDOWS_SERVICE/SPEC.md);
   решение владельца 2026-09-24, пара SPEC 141 лаунчера). На Windows `lxd` собирался, но `--service` был заглушкой,
@@ -62,6 +120,13 @@ required for stable tags); this changelog section is the fallback used for pre-r
     Демон под SCM идёт через `svc.Run`: `START_PENDING` → daemon.json → лог → самопроверка → `Chdir` в state-каталог →
     сразу `RUNNING`; stop/shutdown отменяют `lxd.Run` (новая ветка `ctx.Done()`, общая для всех платформ) со сторожем
     10 с.
+  - Контекст службы (rc.3): тело службы запускает `lxd.Run` на контексте от `globalCtx` с отменой по стопу SCM, как
+    консольный `lxd`; `lxd.Run` без реестра сервисов ядра отказывает сразу (`lxd: context without service registry`).
+    В rc.1/rc.2 контекстом был `context.Background()`: первый `/admin/apply` паниковал (`missing service registry in
+    context`), net/http рвал соединение (клиент — EOF), стек уходил в stderr, которого у службы нет. Паника в admin
+    REST — стек в лог демона и JSON 500, если ответ ещё не начат; в gRPC — recover-интерсепторы (`daemon/server_recover_lx.go`,
+    две строки `// lx:` в `daemon/server.go`), `codes.Internal` и стек в лог; на Windows stdlib `log` (ошибки
+    net/http) тоже пишется в `lxd.log`. ([SPEC 103 §4.4](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/103-LXD_WINDOWS_SERVICE/SPEC.md))
   - Защищённая копия и набор: `<ProgramFiles>\sing-box-lxd\sing-box-lxd.exe` плюс `libcronet.dll`, если она лежит
     рядом с источником (`wintun.dll` встроен в `sing-tun` и в набор не входит). Замена члена набора — временный файл
     → DACL → сверка sha256 → `rename` старого в `.old` → временный на место; одинаковый набор не трогается
@@ -116,9 +181,9 @@ required for stable tags); this changelog section is the fallback used for pre-r
     `go test` пакетов `lxd` и `cmd/sing-box` с полным набором тегов).
   - Поведение macOS, Linux и Android не меняется, кроме перечисленного: флаги `--invite-out`/`--invite-name`, норма
     имени клиента, замена клиента именным enroll, строка INFO самопроверки на macOS. Win7-386 собирается без
-    `with_lxd` — службы там нет. Живой прогон на Windows (install → status `OK` → повторный install → copy →
-    uninstall `--keep-copy` → uninstall, `sc qc`/`sdshow`, `icacls`, ротация, сопряжение лаунчера через
-    `--invite-out`) — за лаунчер-сессией.
+    `with_lxd` — службы там нет. Живой прогон на Windows 10 через лаунчер (rc.1→rc.3): дефект контекста службы
+    найден и закрыт в rc.3, цикл install/status/uninstall и сопряжение лаунчера через `--invite-out` подтверждены
+    владельцем 2026-09-25 (SPEC 103 — D).
 
 - ✨ **XHTTP: версия HTTP по `tls.alpn`, как у Xray — HTTP/1.1, HTTP/2, HTTP/3**
   ([SPEC 104](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/104-XHTTP_HTTP_VERSION_PARITY/SPEC.md),
