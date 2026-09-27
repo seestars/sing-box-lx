@@ -28,6 +28,26 @@ required for stable tags); this changelog section is the fallback used for pre-r
 > тогда. Пользовательские ноты билингвальны там, где это важно, — в
 > [`releases/`](releases/).
 
+#### v1.14.2-lx.5
+
+Хотфикс поверх `v1.14.2-lx.4`. Пользовательские ноты (EN+RU):
+[`docs-lx/releases/v1.14.2-lx.5.md`](releases/v1.14.2-lx.5.md). База — sing-box `v1.14.2`,
+зависимости с lx.4 не менялись. `upstream/stable` на 2026-09-26 ушёл на три коммита после `v1.14.2`
+(`Fix system TUN read loop stopping on write errors`, `Fix local DNS server ignoring systemd-resolved
+global DNS servers`, чистка документации) без нового тега — сознательно не взяты в хотфикс, заберём
+следующим релизом.
+
+- 🐛 **`sing-box schema` падал на lx-типах** — генератор JSON-схемы апстрима (1.14) требует, чтобы
+  каждый тип с собственным `UnmarshalJSON` описывал себя через `DescribeSchema`; наши `AWGRange`
+  (`persistent_keepalive_interval`, `h1..h4`, тайминги AWG 3.x), `XmuxRange` (xmux XHTTP) и
+  `rewrite` у `chain` этого не делали, и команда завершалась `FATAL unmapped custom JSON type
+  option.AWGRange`. Теперь все три типа описаны (число или `"N-M"`; строка/число/`[min,max]`;
+  объект «тип → merge-patch», для чего `rewrite` получил именованный тип `ChainRewrite` с тем же
+  underlying `map[string]any`), а `xhttp` добавлен в union транспортов `V2RayTransport`, где список
+  вариантов захардкожен апстримом. Страж-тест `TestSchemaGeneratesWithLXTypes` гоняет генератор
+  под тегами сборки. Заявлено в
+  [issue #30](https://github.com/Leadaxe/sing-box-lx/issues/30).
+
 #### v1.14.2-lx.4
 
 Поверх `v1.14.2-lx.3`. База — sing-box `v1.14.2`.
