@@ -7,7 +7,7 @@
 | Field | Value |
 |-------|-------|
 | Type | F (feature) — client outbound |
-| Status | N (new) — draft for discussion; decided: Q1 (in-tree, protocol core as a self-contained package), Q4 (desktop + routers), Q5 ("TrustTunnel" label), Q6 (the server side is written right away, task 134), tests (`lx-test/` stands, upstream `test/` left to others); the rest of §7 is open. Experimental: in `LX_TAGS` since 2026-10-16 (owner), ships in the desktop and router binaries, the interface may still change |
+| Status | N (new) — draft for discussion; decided: Q1 (in-tree, protocol core as a self-contained package), Q4 (desktop + routers), Q5 ("TrustTunnel" label), Q6 (the server side is written right away, task 134), tests (`lx-test/` stands, upstream `test/` left to others); the rest of §7 is open. In `LX_TAGS` since 2026-10-16 (owner), ships in the desktop and router binaries |
 | Branch | `lx` |
 | Build tag | `with_trusttunnel` |
 | Discussion | [Leadaxe/sing-box-lx#46](https://github.com/Leadaxe/sing-box-lx/issues/46) |
@@ -195,8 +195,8 @@ of this task) plus `idle_timeout`. mihomo's keys (`health-check`, `udp`, `sni`, 
   from the dial fields (`detour` works).
   - **No keepalive.** No HTTP/2 PING (`ReadIdleTimeout` off), no QUIC `KeepAlivePeriod`; the
     QUIC session is allowed to time out silently (quic-go closes locally without sending).
-    Its QUIC idle timeout equals the idle window (`idle_timeout`, or the 5-minute stale
-    window when teardown is off), capped at 600 s, the endpoint's own session limit.
+    Its QUIC idle timeout is a fixed 600 s, the endpoint's own session limit; the idle
+    window (`idle_timeout`) and the stale rule apply on top of it.
     While the node is idle there are no outgoing packets, whatever the config.
   - **Idle teardown.** After `idle_timeout` without a request the session is closed locally
     (no packets); the next request opens a new one. This is the MASQUE `idle_timeout`
@@ -227,10 +227,9 @@ of this task) plus `idle_timeout`. mihomo's keys (`health-check`, `udp`, `sni`, 
   the error `trusttunnel is not included in this build, rebuild with -tags with_trusttunnel`;
   the rest of the core is upstream byte for byte.
 - **R9. Builds.** The tag is in `LX_TAGS` — desktop binaries and static router builds
-  (owner's decision 2026-10-15, §7 Q4; enabled 2026-10-16). It ships as experimental: the
-  `trusttunnel` type is in the release binaries, its interface may still change. The AAR
-  (`sharedTags`) does not carry it. The build without the tag and `go vet` under both tag
-  sets are green.
+  (owner's decision 2026-10-15, §7 Q4; enabled 2026-10-16): the `trusttunnel` type is in
+  the release binaries. The AAR (`sharedTags`) does not carry it. The build without the tag
+  and `go vet` under both tag sets are green.
 - **R10. Identity headers.** `user-agent` per §2.3: platform from `GOOS`
   (`darwin` → `Mac`, `windows` → `Windows`, `linux` → `Linux`, `android` → `Android`,
   `ios` → `iOS`), application string per Q10; `<platform> _udp2` on the UDP stream,

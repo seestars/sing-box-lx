@@ -7,7 +7,7 @@ with current Xray and AmneziaWG servers, a daemon and observability for the apps
 
 - **Compatibility with today's servers and networks.** REALITY with the hybrid post-quantum
   ML-KEM key exchange (X25519MLKEM768) that current Xray requires, XHTTP, VLESS `encryption`,
-  AmneziaWG 3.x, ClientHello fragmentation, WARP over MASQUE.
+  AmneziaWG 3.x, ClientHello fragmentation, WARP over MASQUE, TrustTunnel.
 - **A core built to be operated** by demanding consumers — the desktop launcher, the LxBox
   Android app, routers: daemon mode, observability over gRPC, energy saving with sleep for idle
   tunnels, router builds.
@@ -67,6 +67,7 @@ its README — [on GitHub](https://github.com/SagerNet/sing-box/blob/main/README
 | **MASQUE / Cloudflare WARP** — [009](SPECS/FEATURES/009-MASQUE_WARP/FEATURE.md) | `type: masque` outbound | CONNECT-IP (RFC 9484) over HTTP/3 or HTTP/2 through a userspace network stack; `profile: cloudflare` for WARP; standard `tls` block; idle-suspend and self-healing reconnect | — | device-verified on Wi-Fi and LTE, `h3` and `h2` |
 | **REALITY against current Xray** — [017](SPECS/FEATURES/017-REALITY/FEATURE.md) | `tls.reality` + `tls.utls.fingerprint`, `tls.reality.key_share`, `tls.fragment` / `record_fragment` | The hybrid post-quantum key share `X25519MLKEM768` that Xray ≥ v26.9.8 requires, on `chrome`, `firefox`, `safari` (the latter two via the utls fork submodule); per-node `key_share: classical \| hybrid`; ClientHello fragmentation now applies to REALITY | — (inside `with_utls`) | stand-verified against Xray v26.9.9 and older; `firefox`/`safari` field-confirmed; `key_share` and fragmentation await a field run |
 | **VLESS `encryption`** — [012](SPECS/FEATURES/012-VLESS_ENCRYPTION/FEATURE.md) | `encryption` field on a `vless` outbound | Post-quantum `mlkem768x25519plus` layer *inside* VLESS, beneath the transport and independent of TLS/REALITY | — | device-verified: previously dead subscription nodes came alive |
+| **TrustTunnel** — [018](SPECS/FEATURES/018-TRUSTTUNNEL/FEATURE.md) | `type: trusttunnel` outbound **and inbound** | AdGuard's TrustTunnel: proxy `CONNECT` with Basic auth over HTTP/2 (TLS, uTLS) or HTTP/3 (QUIC); TCP per stream, UDP as `_udp2` frames; one session per node, silent while idle, transparent rebuild; the inbound mirrors the official endpoint's limits and answers probes with 404 | `with_trusttunnel` | interoperable with the official endpoint 1.1.0 and client 1.1.11 on the stand, both directions; no live VPS run yet |
 
 ### Routing and DNS
 
@@ -85,7 +86,7 @@ its README — [on GitHub](https://github.com/SagerNet/sing-box/blob/main/README
 | **Idle-suspend (energy)** — [008](SPECS/FEATURES/008-ENERGY/FEATURE.md) | `route.lx_idle_suspend` / `lx_idle_suspend_reachable` / `lx_idle_teardown`, `urltest` `mode: failover` | Three sleep levels for idle WireGuard/AWG endpoints: battery, heat and RAM on multi-node mobile profiles | `with_lx_idle_suspend` (baked into the AAR) | device-verified: RSS −31 % |
 | **`lxd` daemon** — [014](SPECS/FEATURES/014-LXD_DAEMON/FEATURE.md) | `sing-box lxd` subcommand | The core in-process behind a management channel that outlives every config change: gRPC + admin-REST on one port, `apply` with automatic rollback, mTLS with enrolment, service install, host telemetry | `with_lxd` | device-verified on macOS; OpenWrt installer scripts field-tested |
 
-> **Not supported, by design:** server halves of the above; Xray's post-quantum REALITY **signatures** (`pqv` / ML-DSA-65) and `spiderX` — a different mechanism from the key exchange, absent from sing-box; the `edge`, `ios`, `android`, `360`, `qq` fingerprints against Xray ≥ v26.9.8 (no upstream preset carries the hybrid share, Xray has the same boundary; substituting the fingerprint is the applications' job).
+> **Not supported, by design:** server halves of the above, except the `trusttunnel` inbound; Xray's post-quantum REALITY **signatures** (`pqv` / ML-DSA-65) and `spiderX` — a different mechanism from the key exchange, absent from sing-box; the `edge`, `ios`, `android`, `360`, `qq` fingerprints against Xray ≥ v26.9.8 (no upstream preset carries the hybrid share, Xray has the same boundary; substituting the fingerprint is the applications' job).
 
 ---
 
@@ -103,7 +104,7 @@ make -f Makefile.lx lx-check        # validate the sample configs in lx-test/con
 - **The tag set** (`make -f Makefile.lx lx-print-tags` is the single source of truth):
 
   ```
-  with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_clash_api,with_naive_outbound,with_purego,badlinkname,tfogo_checklinkname0,with_xhttp,with_awg,with_lx_command,with_lxd,with_openvpn,with_openconnect,with_lx_chain,with_tailscale
+  with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_clash_api,with_naive_outbound,with_purego,badlinkname,tfogo_checklinkname0,with_xhttp,with_awg,with_lx_command,with_lxd,with_openvpn,with_openconnect,with_lx_chain,with_tailscale,with_trusttunnel
   ```
 
   That is upstream's client feature set minus the server-only tags (`with_acme`, `with_ccm`/`with_ocm`), plus `with_purego` (CGO-free cross-compile, so `with_naive_outbound` builds at `CGO=0`) and our own tags. `with_lx_command` (libbox command-protocol extensions) and `with_lxd` (the daemon) are independent by design.
@@ -237,6 +238,7 @@ upstream/stable  ──merge──►  lx  =  upstream  +  // lx seams  +  lx-ow
 - **Releases**: tags `vX.Y.Z-lx.N` are stable, `-rc.N` / `-alpha.N` / `-beta.N` are pre-releases; the procedure is the [release runbook](docs-lx/lx-release-runbook.md) ([RU](docs-lx/lx-release-runbook.ru.md)); the engineering log is [lx-changelog.md](docs-lx/lx-changelog.md), user-facing notes are in [`docs-lx/releases/`](docs-lx/releases/).
 - **Spec Kit**: [`SPECS/FEATURES`](SPECS/FEATURES/README.md) describes each feature's current state as a black box; [`SPECS/TASKS`](SPECS/README.md) holds one folder per unit of work (`SPEC → PLAN → TASKS → report`), with a roadmap and status codes; [CONSTITUTION](SPECS/CONSTITUTION.md) holds the rules.
 - **Remotes**: `origin` = `Leadaxe/sing-box-lx` (default branch `lx`), `upstream` = `SagerNet/sing-box`.
+- **Contributing**: the feature path (issue → spec → stand → code → acceptance), code rules and PR requirements are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Consumers
 
@@ -286,6 +288,7 @@ Everything downstream is either a new file or a seam marked `// lx`; `grep -rn "
 | Protocols & transports | [docs-lx/protocols-transports.md](docs-lx/protocols-transports.md) ([RU](docs-lx/protocols-transports.ru.md)) — XHTTP, AmneziaWG, MASQUE, REALITY, VLESS `encryption` in depth |
 | How the Xray protocols work | [docs-lx/xray-protocols-explained.md](docs-lx/xray-protocols-explained.md) ([RU](docs-lx/xray-protocols-explained.ru.md)) — REALITY, Vision, XHTTP, VLESS `encryption`: mechanics, the fork's implementation, differences from vanilla, Xray ↔ sing-box-lx examples |
 | How AmneziaWG works | [docs-lx/amneziawg-explained.md](docs-lx/amneziawg-explained.md) ([RU](docs-lx/amneziawg-explained.ru.md)) — three obfuscation layers, the MTU budget, the graft in the wireguard-go fork, `awg.conf` ↔ endpoint example |
+| How TrustTunnel works | [docs-lx/trusttunnel-protocols-explained.md](docs-lx/trusttunnel-protocols-explained.md) ([RU](docs-lx/trusttunnel-protocols-explained.ru.md)) — the wire format over HTTP/2 and HTTP/3, detectability, the session model, the outbound and inbound in the fork, practical guidance |
 | Energy guide | [docs-lx/lx-energy.md](docs-lx/lx-energy.md) ([RU](docs-lx/lx-energy.ru.md)) — idle-suspend levels, `mode: failover`, tuning |
 | Sniffers | [docs-lx/lx-sniff.md](docs-lx/lx-sniff.md) ([RU](docs-lx/lx-sniff.ru.md)) |
 | `lxd` operator's guide | [docs-lx/lxd-daemon.md](docs-lx/lxd-daemon.md) ([RU](docs-lx/lxd-daemon.ru.md)) |

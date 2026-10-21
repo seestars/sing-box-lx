@@ -17,7 +17,7 @@ features of `sing-box-lx`:
 | **AmneziaWG 2.0/3.x** (AWG2, AWG3) obfuscation | `with_awg` | promoted fields on a `wireguard` **endpoint** | [§2](#2-amneziawg-203x-awg2-awg3) |
 | **MASQUE** outbound (CONNECT-IP / WARP) | `with_quic` + `with_gvisor` | `outbounds[].type: "masque"` | [§3](#3-masque-outbound-connect-ip--warp) |
 | **REALITY** client (hybrid key share, `key_share`, fragmentation) and **VLESS `encryption`** | — (REALITY inside `with_utls`) | `tls` block of a TLS-over-TCP **outbound**; flat `encryption` field on `vless` | [§5](#5-reality-and-vless-encryption) |
-| **TrustTunnel** outbound and inbound (AdGuard VPN protocol), experimental | `with_trusttunnel` (+ `with_quic` for HTTP/3), in `LX_TAGS` since lx.21, not in the AAR | `outbounds[].type` / `inbounds[].type: "trusttunnel"` | [§6](#6-trusttunnel-outbound-and-inbound-experimental) |
+| **TrustTunnel** outbound and inbound (AdGuard VPN protocol) | `with_trusttunnel` (+ `with_quic` for HTTP/3), in `LX_TAGS` since lx.21, not in the AAR | `outbounds[].type` / `inbounds[].type: "trusttunnel"` | [§6](#6-trusttunnel-outbound-and-inbound) |
 
 Plus [§4](#4-grpc-transport) — the **gRPC** transport, which is upstream's, not
 ours, and appears here only for the one place our behaviour has downstream
@@ -101,7 +101,7 @@ transport (which would defeat the obfuscation). The exact messages:
   - [5.5 The `encryption` field on `vless`](#55-the-encryption-field-on-vless)
   - [5.6 `encryption` validation errors (verbatim)](#56-encryption-validation-errors-verbatim)
   - [5.7 Examples](#57-examples)
-- [§6 TrustTunnel outbound and inbound (experimental)](#6-trusttunnel-outbound-and-inbound-experimental)
+- [§6 TrustTunnel outbound and inbound](#6-trusttunnel-outbound-and-inbound)
   - [6.1 What it is](#61-what-it-is)
   - [6.2 Outbound fields](#62-outbound-fields)
   - [6.3 Start-time validation (verbatim)](#63-start-time-validation-verbatim)
@@ -1286,17 +1286,17 @@ and [§5.8](xray-protocols-explained.md#58-example-xray-and-sing-box-lx).
 
 ---
 
-# 6. TrustTunnel outbound and inbound (experimental)
+# 6. TrustTunnel outbound and inbound
 
-> 🧪 **Experimental.** Built into the desktop and router release binaries since lx.21 (tag
+> Built into the desktop and router release binaries since lx.21 (tag
 > `with_trusttunnel` in `LX_TAGS`; HTTP/3 also needs `with_quic`, which is in the set). The
-> `trusttunnel` type ships, but its interface may still change between releases. The
 > Android AAR does not carry the tag. A custom build without it rejects both types at load
 > time: `trusttunnel is not included in this build, rebuild with -tags with_trusttunnel`.
 
 ## 6.1 What it is
 
-TrustTunnel is the AdGuard VPN protocol (Apache-2.0, `PROTOCOL.md` v1.0): HTTP/2 over
+TrustTunnel is the AdGuard VPN protocol (Apache-2.0; the wire specification is
+[`PROTOCOL.md` v1.0](https://github.com/TrustTunnel/TrustTunnel/blob/master/PROTOCOL.md) in the official repository `TrustTunnel/TrustTunnel`): HTTP/2 over
 TLS or HTTP/3 over QUIC to a real domain, with a proxy `CONNECT` and Basic auth inside.
 Every TCP connection is a `CONNECT host:port` stream, every UDP session a
 `CONNECT _udp2` stream carrying framed datagrams; all streams of a node share one
@@ -1362,8 +1362,8 @@ so TLS-in-TLS of a proxied HTTPS connection stays visible to traffic analysis.
   or `trusttunnel: server responded 407 Proxy Authentication Required`. A 403/404/405/407
   also tears the session down.
 - **No keepalive, no timers while idle.** No HTTP/2 PING, no QUIC keepalive. The HTTP/3
-  session's QUIC idle timeout equals the idle window (capped at 600 s, the endpoint's
-  `client_listener_timeout_secs`). A session silent for longer than the idle window is
+  session's QUIC idle timeout is a fixed 600 s, the endpoint's own
+  `client_listener_timeout_secs`; the idle window below applies on top of it. A session silent for longer than the idle window is
   treated as stale: the next `CONNECT` on it gets 3 s, then the session is rebuilt and the
   `CONNECT` repeated once within the caller's deadline.
 - **One session per node.** At the endpoint's stream limit (1000 on HTTP/2, 4096 on
