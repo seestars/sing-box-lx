@@ -131,7 +131,7 @@ func abortRaise(upload *io.PipeReader, cancel context.CancelFunc, release *xmuxR
 // sessionId. Sending "<path>/<sessionId>" instead routes the server into the
 // stream-down branch, which never pairs with a stream-up POST, so the response
 // body carries non-VLESS bytes and the VLESS layer fails with "unknown version".
-func (c *Client) dialStreamOne(ctx context.Context, sessionID string, xmuxClient *xmuxClient, release *xmuxRelease) (net.Conn, error) {
+func (c *Client) dialStreamOne(ctx context.Context, sessionID string, xmuxClient *xmuxClient, release *xmuxRelease, trace *xhttpTrace) (net.Conn, error) {
 	_ = sessionID // intentionally unused: stream-one sends no sessionId on the wire
 	pipeReader, pipeWriter := io.Pipe()
 	body := newAdoptedBody(pipeReader)
@@ -143,7 +143,7 @@ func (c *Client) dialStreamOne(ctx context.Context, sessionID string, xmuxClient
 	// every healthy detour conn at 15 s. The dial context bounds the raise only,
 	// by parking the dial itself (lx: SPEC 077); conn teardown cancels connCtx
 	// via Close/fail.
-	connCtx, connCancel := context.WithCancel(c.transportContext())
+	connCtx, connCancel := context.WithCancel(trace.requestContext(c.transportContext())) // lx: SPEC 139 — the trace, not the dial's cancellation
 	// stream-one carries a body, so it uses the configured upload method (default
 	// POST); the empty sessionID keeps the request on the bare path.
 	request, err := c.newRequest(connCtx, c.meta.uplinkHTTPMethod, "", "", body)
@@ -157,6 +157,7 @@ func (c *Client) dialStreamOne(ctx context.Context, sessionID string, xmuxClient
 	conn.cancel = connCancel
 	go func() {
 		response, err := xmuxClient.roundTrip(request)
+		trace.response(response, err) // lx: SPEC 139
 		if err != nil {
 			conn.fail(err)
 			return
@@ -183,9 +184,9 @@ func (c *Client) dialStreamOne(ctx context.Context, sessionID string, xmuxClient
 // server holds the stream-down response until the paired stream-up request has
 // delivered bytes, so blocking on it here deadlocks the dial and the fronting
 // proxy answers 504. See the note on dialPacketUp. lx: SPEC 002.
-func (c *Client) dialStreamUp(ctx context.Context, sessionID string, xmuxClient *xmuxClient, release *xmuxRelease) (net.Conn, error) {
+func (c *Client) dialStreamUp(ctx context.Context, sessionID string, xmuxClient *xmuxClient, release *xmuxRelease, trace *xhttpTrace) (net.Conn, error) {
 	// lx: SPEC 072 — conn-scoped request context; see dialStreamOne.
-	connCtx, connCancel := context.WithCancel(c.transportContext())
+	connCtx, connCancel := context.WithCancel(trace.requestContext(c.transportContext())) // lx: SPEC 139 — the trace, not the dial's cancellation
 	// Download: GET response body (no seq — stream mode).
 	downReq, err := c.newRequest(connCtx, http.MethodGet, sessionID, "", nil)
 	if err != nil {
@@ -206,6 +207,7 @@ func (c *Client) dialStreamUp(ctx context.Context, sessionID string, xmuxClient 
 	conn.cancel = connCancel
 	go func() {
 		downResp, err := xmuxClient.roundTrip(downReq)
+		trace.response(downResp, err) // lx: SPEC 139
 		if err != nil {
 			conn.fail(E.Cause(err, "open download"))
 			return
@@ -253,7 +255,7 @@ func (c *Client) dialStreamUp(ctx context.Context, sessionID string, xmuxClient 
 // client (sing-box-extended) works: its OpenStream likewise returns as soon as
 // the connection is established (httptrace GotConn) and processes the response
 // asynchronously. lx: SPEC 002.
-func (c *Client) dialPacketUp(ctx context.Context, sessionID string, xmuxClient *xmuxClient, release *xmuxRelease) (net.Conn, error) {
+func (c *Client) dialPacketUp(ctx context.Context, sessionID string, xmuxClient *xmuxClient, release *xmuxRelease, trace *xhttpTrace) (net.Conn, error) {
 	// lx: SPEC 072 — conn-scoped request context (see dialStreamOne); the
 	// download GET and every upload POST ride it, and Close/fail cancel it. The
 	// dial context is deliberately NOT waited on here (lx: SPEC 077 applies to
@@ -263,7 +265,7 @@ func (c *Client) dialPacketUp(ctx context.Context, sessionID string, xmuxClient 
 	// raise precondition; a caller that cancels its dial abandons the conn and
 	// tears everything down via Close.
 	_ = ctx
-	connCtx, connCancel := context.WithCancel(c.transportContext())
+	connCtx, connCancel := context.WithCancel(trace.requestContext(c.transportContext())) // lx: SPEC 139 — the trace, not the dial's cancellation
 	// Download stream: GET with the session id but no seq (downlink).
 	downReq, err := c.newRequest(connCtx, http.MethodGet, sessionID, "", nil)
 	if err != nil {
@@ -274,6 +276,7 @@ func (c *Client) dialPacketUp(ctx context.Context, sessionID string, xmuxClient 
 	conn.cancel = connCancel
 	go func() {
 		downResp, err := xmuxClient.roundTrip(downReq)
+		trace.response(downResp, err) // lx: SPEC 139
 		if err != nil {
 			conn.fail(E.Cause(err, "open download"))
 			return

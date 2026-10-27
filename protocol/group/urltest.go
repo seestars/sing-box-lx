@@ -131,10 +131,11 @@ func (s *URLTest) Now() string {
 	if s.balancer != nil {
 		return s.group.lastSelected.Load()
 	}
-	if s.group.selectedOutboundTCP != nil {
-		return s.group.selectedOutboundTCP.Tag()
-	} else if s.group.selectedOutboundUDP != nil {
-		return s.group.selectedOutboundUDP.Tag()
+	selectedTCP, selectedUDP := s.group.selectedLx() // lx: SPEC 139
+	if selectedTCP != nil {
+		return selectedTCP.Tag()
+	} else if selectedUDP != nil {
+		return selectedUDP.Tag()
 	}
 	// lx: SPEC 019 — cold start: before the first URL-test, selectedOutbound* is nil but
 	// traffic already flows via the Select() fallback (outbounds[0] when no history yet).
@@ -212,11 +213,12 @@ func (s *URLTest) References() []string {
 		return nil
 	}
 	var references []string
-	if group.selectedOutboundTCP != nil {
-		references = append(references, group.selectedOutboundTCP.Tag())
+	selectedTCP, selectedUDP := group.selectedLx() // lx: SPEC 139
+	if selectedTCP != nil {
+		references = append(references, selectedTCP.Tag())
 	}
-	if group.selectedOutboundUDP != nil && group.selectedOutboundUDP != group.selectedOutboundTCP {
-		references = append(references, group.selectedOutboundUDP.Tag())
+	if selectedUDP != nil && selectedUDP != selectedTCP {
+		references = append(references, selectedUDP.Tag())
 	}
 	references = append(references, s.poolReferences()...) // lx: SPEC 109
 	return references
@@ -243,7 +245,7 @@ func (s *URLTest) selectBalanced(ctx context.Context, network string, destinatio
 		return node
 	})
 	if selected != nil {
-		s.group.lastSelected.Store(selected.Tag())
+		s.group.balancedPicked(ctx, selected) // lx: SPEC 139 — group stage; a probe leaves Now() alone
 	}
 	return selected
 }
@@ -285,7 +287,7 @@ func (s *URLTest) DialContext(ctx context.Context, network string, destination M
 		case N.NetworkTCP, N.NetworkUDP:
 			// lx: SPEC 054 — penalty-aware pick: аварийный режим обходит кеш
 			// selectedOutbound*; обычный — апстримная семантика (кеш, иначе Select).
-			outbound = s.group.pickForDial(N.NetworkName(network))
+			outbound = s.group.pickForDial(ctx, N.NetworkName(network)) // lx: SPEC 139 (ctx: group stage)
 		default:
 			return nil, E.Extend(N.ErrUnknownNetwork, network)
 		}
@@ -304,7 +306,7 @@ func (s *URLTest) DialContext(ctx context.Context, network string, destination M
 	// lx:end chain
 	if err == nil {
 		if s.balancer == nil {
-			s.group.penaltyReset(RealTag(s.outbound, outbound)) // lx: SPEC 054 — успех = доказательство жизни
+			s.group.penaltyResetOnDial(ctx, RealTag(s.outbound, outbound)) // lx: SPEC 054 — успех = доказательство жизни; SPEC 139 — not for a probe
 		}
 		return s.group.interruptGroup.NewConn(conn, interrupt.IsExternalConnectionFromContext(ctx)), nil
 	}
@@ -313,7 +315,7 @@ func (s *URLTest) DialContext(ctx context.Context, network string, destination M
 	// unknown (dead node vs. dead destination vs. local network drop). Only the health-check
 	// changes pool membership. least_test keeps the upstream behaviour (drop the history).
 	if s.balancer == nil {
-		s.group.history.DeleteURLTestHistory(outbound.Tag())
+		s.group.deleteHistoryOnDialError(ctx, outbound.Tag()) // lx: SPEC 139 — a probe keeps the history
 		// lx: SPEC 054 — «путь мёртв» → штраф + один fallback-дайл; успех
 		// переносит выбор группы на fallback (без Interrupt).
 		if fbConn, fallback, ok := s.group.penaltyFailoverDial(ctx, N.NetworkName(network), destination, outbound, err); ok {
@@ -332,7 +334,7 @@ func (s *URLTest) ListenPacket(ctx context.Context, destination M.Socksaddr) (ne
 	} else {
 		// lx: SPEC 054 — общий penalty-aware выбор (штрафы копит только TCP,
 		// UDP ими пользуется).
-		outbound = s.group.pickForDial(N.NetworkUDP)
+		outbound = s.group.pickForDial(ctx, N.NetworkUDP) // lx: SPEC 139 (ctx: group stage)
 	}
 	if outbound == nil {
 		return nil, E.New("missing supported outbound")
@@ -350,7 +352,7 @@ func (s *URLTest) ListenPacket(ctx context.Context, destination M.Socksaddr) (ne
 	s.logger.ErrorContext(ctx, err)
 	// lx: SPEC 019 v2 — round_robin dial error leaves the pool untouched (see DialContext).
 	if s.balancer == nil {
-		s.group.history.DeleteURLTestHistory(outbound.Tag())
+		s.group.deleteHistoryOnDialError(ctx, outbound.Tag()) // lx: SPEC 139 — a probe keeps the history
 	}
 	return nil, err
 }
@@ -381,6 +383,7 @@ type URLTestGroup struct {
 	checking                     atomic.Bool
 	selectedOutboundTCP          adapter.Outbound
 	selectedOutboundUDP          adapter.Outbound
+	selectedAccess               sync.RWMutex // lx: SPEC 139 — guards the two fields above for lock-free readers (urltest_selected_lx.go)
 	interruptGroup               *interrupt.Group
 	interruptExternalConnections bool
 	access                       sync.Mutex
@@ -499,18 +502,19 @@ func (g *URLTestGroup) Close() error {
 func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
 	var minDelay uint16
 	var minOutbound adapter.Outbound
+	selectedTCP, selectedUDP := g.selectedLx() // lx: SPEC 139
 	switch network {
 	case N.NetworkTCP:
-		if g.selectedOutboundTCP != nil {
-			if history := g.history.LoadURLTestHistory(RealTag(g.outbound, g.selectedOutboundTCP)); history != nil {
-				minOutbound = g.selectedOutboundTCP
+		if selectedTCP != nil {
+			if history := g.history.LoadURLTestHistory(RealTag(g.outbound, selectedTCP)); history != nil {
+				minOutbound = selectedTCP
 				minDelay = history.Delay
 			}
 		}
 	case N.NetworkUDP:
-		if g.selectedOutboundUDP != nil {
-			if history := g.history.LoadURLTestHistory(RealTag(g.outbound, g.selectedOutboundUDP)); history != nil {
-				minOutbound = g.selectedOutboundUDP
+		if selectedUDP != nil {
+			if history := g.history.LoadURLTestHistory(RealTag(g.outbound, selectedUDP)); history != nil {
+				minOutbound = selectedUDP
 				minDelay = history.Delay
 			}
 		}
@@ -763,7 +767,7 @@ func (g *URLTestGroup) performSelectionUpdate(reselect bool) {
 		if outbound != g.selectedOutboundTCP {
 			changed = true
 		}
-		g.selectedOutboundTCP = outbound
+		g.setSelectedTCPLx(outbound) // lx: SPEC 139
 		selected = true
 	}
 	if outbound, exists := g.selectForUpdate(N.NetworkUDP, reselect); outbound != nil && (g.selectedOutboundUDP == nil || (exists && outbound != g.selectedOutboundUDP)) {
@@ -773,7 +777,7 @@ func (g *URLTestGroup) performSelectionUpdate(reselect bool) {
 		if outbound != g.selectedOutboundUDP {
 			changed = true
 		}
-		g.selectedOutboundUDP = outbound
+		g.setSelectedUDPLx(outbound) // lx: SPEC 139
 		selected = true
 	}
 	if updated {

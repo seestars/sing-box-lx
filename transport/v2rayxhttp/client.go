@@ -79,6 +79,9 @@ type Client struct {
 	// noGRPCHeader suppresses the default "Content-Type: application/grpc" on
 	// streamed-body requests (stream-one, stream-up). See option.NoGRPCHeader.
 	noGRPCHeader bool
+	// serverName is the TLS server name, the subject of the REUSED `tls` stage a
+	// connection test records for a pooled transport (lx: SPEC 139).
+	serverName string
 }
 
 // NewClient builds an XHTTP client transport. The tlsConfig (possibly Reality)
@@ -193,6 +196,10 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 		logger.Debug("HTTP version ", version)
 	}
 
+	var serverName string // lx: SPEC 139
+	if tlsConfig != nil {
+		serverName = tlsConfig.ServerName()
+	}
 	var host string
 	if options.Host != "" {
 		host = options.Host
@@ -249,17 +256,23 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 		realityEnabled: realityEnabled,
 		httpVersion:    version,
 		noGRPCHeader:   options.NoGRPCHeader,
+		serverName:     serverName,
 	}, nil
 }
 
 func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 	sessionID := c.newSessionID()
+	trace := c.traceDial(ctx) // lx: SPEC 139 — the `transport` stage; nil without a test
 	// One pooled connection carries this whole dial: both halves of a split mode
 	// and every upload POST of packet-up. It is released once, when the conn
 	// closes — see releaseOnce in conn.go. getContext may wait out the breaker's
 	// backoff window before opening a transport (lx: SPEC 076).
-	xmuxClient, err := c.xmux.getContext(ctx)
+	// lx: SPEC 139 — in a connection test: fresh=true takes a transport outside
+	// the pool, a reused pooled transport gets a REUSED stage. Without a test it
+	// is c.xmux.getContext(ctx).
+	xmuxClient, err := trace.acquire(ctx, c)
 	if err != nil {
+		trace.end(err)
 		return nil, err
 	}
 	xmuxClient.addOpenUsage(1)
@@ -268,15 +281,17 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 	// (fail already released the slot before the error surfaced here) cannot
 	// release twice and drive openUsage negative.
 	release := newXmuxRelease(xmuxClient)
-	conn, err := c.dialMode(ctx, sessionID, xmuxClient, release)
+	conn, err := c.dialMode(ctx, sessionID, xmuxClient, release, trace)
 	if err != nil {
 		release.release()
+		trace.end(err)
 		return nil, err
 	}
+	trace.end(nil)
 	return conn, nil
 }
 
-func (c *Client) dialMode(ctx context.Context, sessionID string, xmuxClient *xmuxClient, release *xmuxRelease) (net.Conn, error) {
+func (c *Client) dialMode(ctx context.Context, sessionID string, xmuxClient *xmuxClient, release *xmuxRelease, trace *xhttpTrace) (net.Conn, error) {
 	switch c.mode {
 	case modeAuto:
 		// Match Xray's auto resolution (transport/internet/splithttp/dialer.go):
@@ -284,15 +299,15 @@ func (c *Client) dialMode(ctx context.Context, sessionID string, xmuxClient *xmu
 		// mode, live-validated against Xray 3x-ui). Xray also picks stream-up when
 		// downloadSettings is present, but we don't support asymmetric transport.
 		if c.realityEnabled {
-			return c.dialStreamOne(ctx, sessionID, xmuxClient, release)
+			return c.dialStreamOne(ctx, sessionID, xmuxClient, release, trace)
 		}
-		return c.dialPacketUp(ctx, sessionID, xmuxClient, release)
+		return c.dialPacketUp(ctx, sessionID, xmuxClient, release, trace)
 	case modePacketUp:
-		return c.dialPacketUp(ctx, sessionID, xmuxClient, release)
+		return c.dialPacketUp(ctx, sessionID, xmuxClient, release, trace)
 	case modeStreamUp:
-		return c.dialStreamUp(ctx, sessionID, xmuxClient, release)
+		return c.dialStreamUp(ctx, sessionID, xmuxClient, release, trace)
 	case modeStreamOne:
-		return c.dialStreamOne(ctx, sessionID, xmuxClient, release)
+		return c.dialStreamOne(ctx, sessionID, xmuxClient, release, trace)
 	default:
 		return nil, E.New("v2ray-xhttp: unknown mode: ", c.mode)
 	}
