@@ -20,12 +20,15 @@ import (
 	"github.com/sagernet/sing-box/common/certificate"
 	"github.com/sagernet/sing-box/common/lxtrace"
 	C "github.com/sagernet/sing-box/constant"
+	"github.com/sagernet/sing-box/dns/transport/fakeip"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
+	R "github.com/sagernet/sing-box/route/rule"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
+	"github.com/sagernet/sing/service"
 
 	"github.com/miekg/dns"
 	"google.golang.org/grpc"
@@ -38,7 +41,7 @@ import (
 // connection over a net.Pipe) or a node directly, and the test's own HTTP
 // client — while the pipeline's `// lx:` insertions write the stages. The
 // stages are streamed as they happen; the last message is the result with
-// the root cause (SPEC 139 §5.2). Findings (§6) are release 2.
+// the root cause (SPEC 139 §5.2) and the findings (§6).
 //
 // Without with_lx_command the stub twin answers codes.Unimplemented.
 
@@ -111,12 +114,16 @@ func (t *connectionTest) run(stream grpc.ServerStreamingServer[ConnectionTestPro
 	}
 	summary := t.tr.Finish(cause)
 	result.RootCause = summary.RootCause
-	if result.HttpStatus != 0 {
+	if result.HttpStatus != 0 || t.depth == lxtrace.DepthConnect && t.dialFinished.Load() {
 		// The path was completed (§3.2): a stage still open when the response
-		// arrived (a lost race ending late, a detour unwinding) is not a cause.
+		// arrived (a lost race ending late, a detour unwinding) is not a cause,
+		// nor is a failed attempt the transport retried on its own (MASQUE h3
+		// falling back to h2, TrustTunnel replacing a stale session).
 		result.RootCause = 0
 	}
 	result.StagesTruncated = summary.Truncated
+	summary.RootCause = result.RootCause
+	result.Findings = connectionTestFindingsToProto(lxtrace.Findings(summary, t.findingState(summary, result)))
 	result.ElapsedMs = clampRttMs(time.Since(t.started))
 	if t.sendFailed.Load() {
 		return nil
@@ -184,30 +191,26 @@ func (t *connectionTest) runAppDNS(ctx context.Context) netip.Addr {
 			continue
 		}
 		stage.Attr("rcode", dns.RcodeToString[response.Rcode])
-		var answers []string
 		for _, record := range response.Answer {
+			stage.Attr("answer", recordText(record, message.Question[0].Name))
+			if answer.IsValid() {
+				continue
+			}
 			switch typed := record.(type) {
 			case *dns.A:
-				answers = append(answers, typed.A.String())
-				if !answer.IsValid() {
-					answer, _ = netip.AddrFromSlice(typed.A)
-				}
+				answer, _ = netip.AddrFromSlice(typed.A)
 			case *dns.AAAA:
-				answers = append(answers, typed.AAAA.String())
-				if !answer.IsValid() {
-					answer, _ = netip.AddrFromSlice(typed.AAAA)
-				}
-			case *dns.CNAME:
-				answers = append(answers, "CNAME "+typed.Target)
-			case *dns.HTTPS:
-				answers = append(answers, "HTTPS "+typed.Target)
-			default:
-				answers = append(answers, dns.TypeToString[record.Header().Rrtype])
+				answer, _ = netip.AddrFromSlice(typed.AAAA)
 			}
 		}
-		if len(answers) > 0 {
-			stage.Attr("answers", strings.Join(answers, ","))
+		if len(response.Answer) == 0 && (response.Rcode == dns.RcodeSuccess || response.Rcode == dns.RcodeNameError) {
+			// NODATA / NXDOMAIN: the SOA says which zone answered and how
+			// long the negative answer is cached.
+			for _, record := range response.Ns {
+				stage.Attr("authority", recordText(record, message.Question[0].Name))
+			}
 		}
+		attrAnswerSource(stage)
 		if response.Rcode != dns.RcodeSuccess {
 			stage.End(E.New("rcode ", dns.RcodeToString[response.Rcode]))
 			continue
@@ -215,6 +218,61 @@ func (t *connectionTest) runAppDNS(ctx context.Context) netip.Addr {
 		stage.End(nil)
 	}
 	return answer
+}
+
+// recordText is a resource record in presentation format without the class:
+// `A 300 192.0.2.1`, `HTTPS 300 1 . alpn="h2,h3"`. The owner name leads only
+// when it is not the queried name: the records after a CNAME, the zone of a
+// SOA in the authority section.
+func recordText(record dns.RR, question string) string {
+	header := record.Header()
+	rdata := strings.TrimPrefix(record.String(), header.String())
+	text := dns.Type(header.Rrtype).String() + " " + strconv.FormatUint(uint64(header.Ttl), 10) + " " + rdata
+	if !strings.EqualFold(header.Name, question) {
+		text = header.Name + " " + text
+	}
+	return text
+}
+
+// attrAnswerSource copies where the answer came from onto the app_dns stage:
+// the last `dns` child is the exchange the router took the answer from
+// (rules may reject earlier ones). fakeip and hosts answer from the core
+// itself: `local`, not `network`. No child means the rule answered itself
+// (predefined, reject) and there is no source to name.
+func attrAnswerSource(stage *lxtrace.Stage) {
+	var source *lxtrace.StageSnapshot
+	for _, child := range stage.Children() {
+		if child.Kind == "dns" {
+			source = &child
+		}
+	}
+	if source == nil {
+		return
+	}
+	if source.Result != lxtrace.Reused {
+		switch stageAttrValue(source.Attrs, "type") {
+		case C.DNSTypeFakeIP, C.DNSTypeHosts:
+			stage.Attr("source", "local")
+		default:
+			stage.Attr("source", "network")
+		}
+		return
+	}
+	stage.Attr("source", "cache")
+	for _, attr := range source.Attrs {
+		if attr.Key == "cache_age" || attr.Key == "stale" {
+			stage.Attr(attr.Key, attr.Value)
+		}
+	}
+}
+
+func stageAttrValue(attrs []lxtrace.Attr, key string) string {
+	for _, attr := range attrs {
+		if attr.Key == key {
+			return attr.Value
+		}
+	}
+	return ""
 }
 
 // detourType is the protocol type of the node the test goes through directly.
@@ -250,7 +308,9 @@ func (t *connectionTest) runViaNode(ctx context.Context, destination M.Socksaddr
 		// No router is involved: there is no rule or group selection to show.
 		return
 	case lxtrace.DepthConnect:
-		dial(ctx)
+		if _, err := dial(ctx); err == nil {
+			t.dialFinished.Store(true) // the emit hook may still be queued; the result reads it next
+		}
 		return
 	}
 	t.runHTTP(ctx, result, dial)
@@ -315,13 +375,16 @@ func (t *connectionTest) runPacketRoute(ctx context.Context, destination M.Socks
 
 // onRouteClosed is the onClose of the routed connection: a non-nil error is a
 // route refusal (reject, outbound not found, missing fakeip record) or the
-// first-hop dial failure, both of which end the path.
+// first-hop dial failure, both of which end the path. Once the first-hop dial
+// has ended OK, the error is the copy loop unwinding (the client closed its
+// side, the server reset the stream): the path was up, and the exchange
+// stage that was running takes the client's error instead.
 func (t *connectionTest) onRouteClosed(err error) {
 	t.routeAccess.Lock()
 	t.routeClosed = true
 	t.routeErr = err
 	t.routeAccess.Unlock()
-	if err != nil {
+	if err != nil && !t.dialFinished.Load() {
 		t.pathFailed.Store(true)
 	}
 	t.routeDoneOnce.Do(func() { close(t.routeDone) })
@@ -343,6 +406,7 @@ func (t *connectionTest) recordRouteError(ctx context.Context, destination M.Soc
 	if t.metadata.Inbound != "" {
 		stage.Attr("inbound", t.metadata.Inbound)
 	}
+	t.attrFakeIPRoute(stage, destination)
 	stage.End(err)
 	t.routeSeen.Store(true)
 }
@@ -406,7 +470,16 @@ func (t *connectionTest) runHTTP(ctx context.Context, result *ConnectionTestResu
 	}
 	defer transport.CloseIdleConnections()
 
-	httpResponse, err := (&http.Client{Transport: transport}).Do(httpRequest)
+	client := &http.Client{
+		Transport: transport,
+		// The test answers whether this URL opens, not where its redirect
+		// chain leads: a 3xx is the answer (§3.2), and following it would ask
+		// for a second connection, to a host the test did not route.
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	httpResponse, err := client.Do(httpRequest)
 	if t.depth != lxtrace.DepthHTTP {
 		if httpResponse != nil {
 			httpResponse.Body.Close()
@@ -433,6 +506,9 @@ func (t *connectionTest) runHTTP(ctx context.Context, result *ConnectionTestResu
 		stage.Attr("content_type", contentType)
 	}
 	stage.Attr("proto", httpResponse.Proto)
+	if location := httpResponse.Header.Get("Location"); location != "" {
+		stage.Attr("location", location)
+	}
 
 	// One byte past the limit tells "ended at the limit" from "was cut" (058).
 	body, err := io.ReadAll(io.LimitReader(httpResponse.Body, t.maxBytes+1))
@@ -682,4 +758,284 @@ func connectionTestStageToProto(snapshot lxtrace.StageSnapshot) *ConnectionTestS
 		}
 	}
 	return stage
+}
+
+// findingState gathers the core state the findings (SPEC 139 §6) are computed
+// against: the source, the TUN inbounds it enters, the fakeip store, the route
+// rule table and the node types. It only reads: the test writes no shared
+// state (§5.7).
+func (t *connectionTest) findingState(summary lxtrace.Summary, result *ConnectionTestResult) lxtrace.FindingState {
+	state := lxtrace.FindingState{
+		Host:      t.host,
+		ConnectIP: t.connectIP,
+		Completed: result.RootCause == 0 && (t.depth != lxtrace.DepthHTTP || result.HttpStatus != 0),
+		FakeIP:    t.fakeIPState(),
+		NodeTypes: t.nodeTypes(summary),
+	}
+	if source := t.request.Source; source != nil {
+		state.PackageName = source.PackageName
+	}
+	if owner := t.metadata.ProcessInfo; owner != nil && owner.UserId > 0 {
+		state.UID = owner.UserId
+	}
+	var options *option.Options
+	if t.instance.runningConfig != "" {
+		// The rule options and the TUN options come from the config snapshot,
+		// as GetRunningConfig returns it (SPEC 037): the live objects keep them
+		// private.
+		parsed, err := parseConfig(t.instance.ctx, t.instance.runningConfig)
+		if err == nil {
+			options = &parsed
+		}
+	}
+	if options != nil {
+		state.TUN = connectionTestTUNs(options, t.metadata.Inbound)
+	}
+	if t.router != nil {
+		state.RouteRules = connectionTestRouteRules(t.router, options)
+		state.QUICRejectedBy = t.quicRejectedBy()
+	}
+	return state
+}
+
+// connectionTestTUNs returns the TUN inbounds the source enters: the source
+// inbound when it is a TUN, every TUN when no inbound was given.
+func connectionTestTUNs(options *option.Options, sourceInbound string) []lxtrace.TUNState {
+	var tuns []lxtrace.TUNState
+	for _, inbound := range options.Inbounds {
+		if inbound.Type != C.TypeTun || sourceInbound != "" && inbound.Tag != sourceInbound {
+			continue
+		}
+		tunOptions, isTUN := inbound.Options.(*option.TunInboundOptions)
+		if !isTUN {
+			continue
+		}
+		tun := lxtrace.TUNState{
+			Tag:             inbound.Tag,
+			IncludePackage:  tunOptions.IncludePackage,
+			ExcludePackage:  tunOptions.ExcludePackage,
+			IncludeUID:      tunOptions.IncludeUID,
+			ExcludeUID:      tunOptions.ExcludeUID,
+			IncludeUIDRange: tunOptions.IncludeUIDRange,
+			ExcludeUIDRange: tunOptions.ExcludeUIDRange,
+		}
+		for _, prefixes := range [][]netip.Prefix{tunOptions.Address, tunOptions.Inet6Address} {
+			for _, prefix := range prefixes {
+				if prefix.Addr().Is6() {
+					tun.HasIPv6 = true
+				}
+			}
+		}
+		tuns = append(tuns, tun)
+	}
+	return tuns
+}
+
+// connectionTestRouteRules lists the route rules as the route stage names them
+// (description, action) with the conditions of each that need the destination
+// address. The router builds one rule per configured rule, in order, so the
+// options line up by index; on a mismatch the conditions are left out.
+func connectionTestRouteRules(router adapter.Router, options *option.Options) []lxtrace.RouteRule {
+	rules := router.Rules()
+	var configured []option.Rule
+	if options != nil && options.Route != nil && len(options.Route.Rules) == len(rules) {
+		configured = options.Route.Rules
+	}
+	routeRules := make([]lxtrace.RouteRule, 0, len(rules))
+	for i, rule := range rules {
+		routeRule := lxtrace.RouteRule{Description: rule.String()}
+		if action := rule.Action(); action != nil {
+			routeRule.Action = action.String()
+		}
+		if configured != nil {
+			routeRule.AddressConditions = ruleAddressConditions(router, configured[i], nil)
+		}
+		routeRules = append(routeRules, routeRule)
+	}
+	return routeRules
+}
+
+func ruleAddressConditions(router adapter.Router, rule option.Rule, conditions []string) []string {
+	if rule.Type == C.RuleTypeLogical {
+		for _, subRule := range rule.LogicalOptions.Rules {
+			conditions = ruleAddressConditions(router, subRule, conditions)
+		}
+		return conditions
+	}
+	options := rule.DefaultOptions.RawDefaultRule
+	if len(options.IPCIDR) > 0 {
+		conditions = appendCondition(conditions, "ip_cidr")
+	}
+	if options.IPIsPrivate {
+		conditions = appendCondition(conditions, "ip_is_private")
+	}
+	if len(options.GeoIP) > 0 {
+		conditions = appendCondition(conditions, "geoip")
+	}
+	if !options.RuleSetIPCIDRMatchSource && !options.Deprecated_RulesetIPCIDRMatchSource {
+		for _, tag := range options.RuleSet {
+			if ruleSet, loaded := router.RuleSet(tag); loaded && ruleSet.Metadata().ContainsIPCIDRRule {
+				conditions = appendCondition(conditions, "rule_set="+tag)
+			}
+		}
+	}
+	return conditions
+}
+
+func appendCondition(conditions []string, condition string) []string {
+	for _, existing := range conditions {
+		if existing == condition {
+			return conditions
+		}
+	}
+	return append(conditions, condition)
+}
+
+// quicRejectedBy names the route rule that rejects udp/443 to the test's host,
+// the way a browser's QUIC attempt would be routed (quic sniffed, the host as
+// its SNI): rules are matched in order, actions are not applied. A TCP https
+// test through the router only; empty otherwise.
+func (t *connectionTest) quicRejectedBy() string {
+	if t.network != N.NetworkTCP || !t.https || t.port != 443 || t.depth == lxtrace.DepthDNS {
+		return ""
+	}
+	metadata := t.metadata
+	metadata.Network = N.NetworkUDP
+	metadata.Protocol = C.ProtocolQUIC
+	metadata.Destination = M.ParseSocksaddrHostPort(t.host, 443)
+	if metadata.Destination.IsFqdn() {
+		metadata.Domain = metadata.Destination.Fqdn
+	}
+	for i, rule := range t.router.Rules() {
+		metadata.ResetRuleCache()
+		if !rule.Match(&metadata) {
+			continue
+		}
+		action := rule.Action()
+		if action == nil {
+			continue
+		}
+		switch typed := action.(type) {
+		case *R.RuleActionReject:
+			text := "route[" + strconv.Itoa(i) + "]"
+			if description := rule.String(); description != "" {
+				text += " " + description
+			}
+			return text + " => " + typed.String()
+		case *R.RuleActionBypass:
+			if typed.Outbound != "" {
+				return ""
+			}
+		}
+		switch action.Type() {
+		case C.RuleActionTypeRoute, C.RuleActionTypeHijackDNS:
+			return ""
+		}
+	}
+	return ""
+}
+
+// fakeIPStore returns the store of the fakeip DNS server, nil without one.
+func (t *connectionTest) fakeIPStore() adapter.FakeIPStore {
+	if t.instance.ctx == nil {
+		return nil
+	}
+	manager := service.FromContext[adapter.DNSTransportManager](t.instance.ctx)
+	if manager == nil {
+		return nil
+	}
+	transport := manager.FakeIP()
+	if transport == nil {
+		return nil
+	}
+	return transport.Store()
+}
+
+// fakeIPState reads the fakeip store without allocating a record.
+func (t *connectionTest) fakeIPState() *lxtrace.FakeIPState {
+	store := t.fakeIPStore()
+	if store == nil {
+		return nil
+	}
+	storeState, loaded := fakeip.LxStateOf(store)
+	if !loaded {
+		return nil
+	}
+	state := &lxtrace.FakeIPState{
+		Inet4Range: storeState.Inet4Range,
+		Inet6Range: storeState.Inet6Range,
+		Persisted:  storeState.Persisted,
+		TTL:        C.DefaultDNSTTL * time.Second,
+		Inet4Wrap:  lxtrace.FakeIPWrap(storeState.Inet4Wrap),
+		Inet6Wrap:  lxtrace.FakeIPWrap(storeState.Inet6Wrap),
+	}
+	if t.connectIP.IsValid() && store.Contains(t.connectIP) {
+		state.ConnectIPDomain, state.ConnectIPKnown = fakeip.LxDomainOf(store, t.connectIP)
+		state.HostAddress, _ = fakeip.LxAddressOf(store, t.host, t.connectIP.Is6())
+	}
+	return state
+}
+
+// attrFakeIPRoute marks a route refusal for a fakeip destination the store
+// has no record for: the router's "missing fakeip record" (SPEC 139 §8.7).
+func (t *connectionTest) attrFakeIPRoute(stage *lxtrace.Stage, destination M.Socksaddr) {
+	if stage == nil || !destination.IsIP() {
+		return
+	}
+	store := t.fakeIPStore()
+	if store == nil || !store.Contains(destination.Addr) {
+		return
+	}
+	stage.Attr("domain_origin", "fakeip")
+	if _, known := fakeip.LxDomainOf(store, destination.Addr); !known {
+		stage.Attr("fakeip", "no_record")
+	}
+}
+
+// nodeTypes maps the tag of every dial and detour stage to its outbound or
+// endpoint type.
+func (t *connectionTest) nodeTypes(summary lxtrace.Summary) map[string]string {
+	types := make(map[string]string)
+	for _, stage := range summary.Stages {
+		if stage.Kind != stageDial && stage.Kind != stageDetour {
+			continue
+		}
+		if _, known := types[stage.Subject]; known || stage.Subject == "" {
+			continue
+		}
+		if t.instance.outboundManager != nil {
+			if outbound, loaded := t.instance.outboundManager.Outbound(stage.Subject); loaded {
+				types[stage.Subject] = outbound.Type()
+				continue
+			}
+		}
+		if t.instance.endpointManager != nil {
+			if endpoint, loaded := t.instance.endpointManager.Get(stage.Subject); loaded {
+				types[stage.Subject] = endpoint.Type()
+			}
+		}
+	}
+	return types
+}
+
+func connectionTestFindingsToProto(findings []lxtrace.Finding) []*ConnectionTestFinding {
+	if len(findings) == 0 {
+		return nil
+	}
+	result := make([]*ConnectionTestFinding, 0, len(findings))
+	for _, finding := range findings {
+		converted := &ConnectionTestFinding{
+			Code:   finding.Code,
+			Level:  ConnectionTestFindingLevel(finding.Level),
+			Stages: finding.Stages,
+		}
+		if len(finding.Attrs) > 0 {
+			converted.Attrs = make([]*ConnectionTestAttr, 0, len(finding.Attrs))
+			for _, attr := range finding.Attrs {
+				converted.Attrs = append(converted.Attrs, &ConnectionTestAttr{Key: attr.Key, Value: attr.Value})
+			}
+		}
+		result = append(result, converted)
+	}
+	return result
 }

@@ -34,6 +34,7 @@ import (
 	"github.com/sagernet/sing/common/debug"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
+	M "github.com/sagernet/sing/common/metadata"
 	"github.com/sagernet/sing/common/ntp"
 	aTLS "github.com/sagernet/sing/common/tls"
 
@@ -147,6 +148,7 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 	}
 
 	err = uConn.HandshakeContext(ctx)
+	realityVerdictLx(ctx, e, verifier.verified, err) // lx: SPEC 139 — reality verdict
 	if err != nil {
 		return nil, err
 	}
@@ -331,7 +333,15 @@ func realityClientFallback(ctx context.Context, uConn net.Conn, serverName strin
 			},
 		},
 	}
-	request, _ := http.NewRequest("GET", "https://"+serverName, nil)
+	serverAddress := M.ParseSocksaddrHostPort(serverName, 0)
+	host := serverAddress.AddrString()
+	if serverAddress.IsIPv6() {
+		host = "[" + host + "]"
+	}
+	request, err := http.NewRequest("GET", "https://"+host, nil)
+	if err != nil {
+		return
+	}
 	request.Header.Set("User-Agent", fingerprint.Client)
 	request.AddCookie(&http.Cookie{Name: "padding", Value: strings.Repeat("0", mRand.Intn(32)+30)})
 	response, err := client.Do(request)

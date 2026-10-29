@@ -7,7 +7,7 @@
 | Field | Value |
 |-------|-------|
 | Type | F (feature). The RPC is a §3.6 bridge; the trace (`common/lxtrace` and its insertions) is lx logic isolated under CONSTITUTION §3.2–3.3, with its merge cost fixed in §10 |
-| Status | I (implemented) — release 1 on `lx` 2026-10-27; see [IMPLEMENTATION_REPORT.md](IMPLEMENTATION_REPORT.md); release 2 not started |
+| Status | I (implemented) — release 1 on `lx` 2026-10-27, release 2 on `lx` 2026-10-28; see [IMPLEMENTATION_REPORT.md](IMPLEMENTATION_REPORT.md) |
 | Branch | `lx` |
 | Related | [#59](https://github.com/Leadaxe/sing-box-lx/issues/59) (request: DNS through the router and rule match — closed by this task) · [Leadaxe/LxBox#176](https://github.com/Leadaxe/LxBox/issues/176) ("Connection Check" screen) · [[SPECS/TASKS/058-GET_URL_VIA_OUTBOUND]] (HTTP probe through a node — the model for errors and body limits) · [[SPECS/TASKS/018-DNS_QUERY_STREAM]] · [[SPECS/TASKS/035-DNS_GROUP_OBSERVABILITY]] (DNS attribution and group probes) · [[SPECS/TASKS/017-CONNECTION_DETOUR_CHAIN]] · [[SPECS/TASKS/038-GOMOBILE_STRING_RETURN_FRAME_KILL]] (libbox return shape) |
 
@@ -154,7 +154,7 @@ message ConnectionTestProgress {
 
 | Outcome | Response |
 |---------|----------|
-| The path was completed and the target server answered with any status | `result.error == ""`, `rootCause == 0`, HTTP fields filled. Non-2xx is data, not an error (as in `GetURLViaOutbound`) |
+| The path was completed and the target server answered with any status | `result.error == ""`, `rootCause == 0`, HTTP fields filled. Non-2xx is data, not an error (as in `GetURLViaOutbound`). A redirect is not followed: the test answers whether this URL opens, so a 3xx is the answer, with its `Location` on the `http` stage |
 | The path broke (DNS, `reject` rule, dial, TLS, timeout…) | `result.error == ""`, `rootCause` points to the stage, HTTP fields empty. A connection failure is a test result, not a call error |
 | Invalid request: malformed URL, unknown node or inbound tag, `network = "udp"` deeper than `DEPTH_ROUTE` | A stream of one `result` with `error`; no stages |
 | The limit of concurrent tests is reached | `result.error = "busy"` |
@@ -227,26 +227,28 @@ without changing the protocol. A client renders an unknown kind as `kind` +
 
 | `kind` | What | Main attributes |
 |--------|------|-----------------|
-| `app_dns` | DNS query of the app (with `appDNS`), one per type: A, AAAA, HTTPS | type, rule (`dns[i]` or `final`), server, answers, rcode, answer source (network / cache with age) |
+| `app_dns` | DNS query of the app (with `appDNS`), one per type: A, AAAA, HTTPS | type, rule (`dns[i]` or `final`), server, rcode; one `answer` per answer record in answer-section order, presentation format without the class; the owner name leads only when it differs from the queried name (`A 300 192.0.2.1`, `CNAME 300 a.example.`, then `a.example. A 300 192.0.2.1`; `HTTPS 300 1 . alpn="h2,h3" ech="…"`, SvcParam values quoted as `dig` prints them); on NXDOMAIN / NODATA one `authority` per authority record in the same format (`example. SOA 30 …`, TTL as cached: min(SOA TTL, minimum)); `source` = `network` / `cache` with `cache_age` in seconds (and `stale` for an optimistic answer) / `local` (fakeip, hosts: the core answered without a query); absent when no DNS server was asked: a rule answered (`predefined`, `reject`), or the domain strategy dropped the type (`ipv4_only` answers AAAA, `ipv6_only` answers A with an empty NOERROR before any `dns` stage) |
 | `route` | Route rule selection | destination, where the domain came from (`request` / `fakeip` / `reverse_mapping` / `sniff` / `none`), sniff result, non-final actions applied in order, rule (`route[i]` + description or `final`), action, outbound, rules that could not be evaluated and why |
 | `group` | Selection in a group | group type and mode, selected node; for per-connection selection — a marker and the slot |
 | `chain` | Unfolding of a `chain` | positions, resolved nodes |
 | `dial` | Connection through a node | tag, type, server address |
 | `detour` | Handing the connection to a detour | detour tag, what was passed: domain or address |
 | `lookup` | Resolving the server address of a node or DNS server | domain, who resolves (`domain_resolver` / `default_domain_resolver` / `dns_rules` with the rule), server, answer |
-| `dns` | Query to a DNS server | tag, type, group path, group probes (as in 035), connection (new / reused, age), rcode |
-| `wake` | Waking an idle-suspended endpoint | how long it slept |
-| `tcp_connect` | TCP connection | address, local address |
-| `quic` | QUIC connection | address, obfuscation |
+| `dns` | Query to a DNS server | tag, type, group path, group probes (as in 035), rcode; `connection=new` / `reused` (a pooled server connection); a reused one adds a child `connection` stage, `REUSED`, subject = server address, `reuse=pooled` (idle in the pool) / `joined` (dialed by a parallel query, e.g. A and AAAA of one lookup), `age` in seconds; under `fresh` `connection=new`, `pool=detached`; a cache hit is `REUSED` with `source=cache`, `ttl` (remaining) and `cache_age` in seconds |
+| `dns_member` | A DNS group member asked by the group, one per attempt (single, rescue fan, fastest election, parallel); the member's own dial stages are its children | subject = member tag; type, outbound; `rcode` when it answered SERVFAIL; a fan participant that ended after the winner answered is `SKIPPED` with `lost_race=<winner's dns_member id>` |
+| `wake` | Waking an idle-suspended WG/AWG endpoint, recorded by the dial that wakes it | subject = endpoint tag; `slept` in seconds, `mode=resume` (device up) / `rebuild` (torn-down device rebuilt); `FAILED` when the endpoint stays down |
+| `tcp_connect` | TCP connection | address, local address; `tfo=deferred` when TCP Fast Open connects on the first write; `inside` = the WG/AWG endpoint tag for a connection opened inside its tunnel |
+| `udp` | UDP socket (a packet connection or a connected UDP socket) | address, local address; `inside` as for `tcp_connect` |
+| `quic` | QUIC connection | address, obfuscation; MASQUE h3 and TrustTunnel h3: server, `sni` / `protocol`; a reused TrustTunnel session is `REUSED` with `session=existing` and `age` |
 | `tls` | TLS handshake | SNI, fingerprint, ALPN, version, key share |
-| `reality` | REALITY verdict | `accepted` / `dest_cert` (the server did not recognize the client and served the dest certificate) / `invalid_cert` |
+| `reality` | REALITY verdict, a child of `tls` | `accepted` / `dest_cert` (the handshake completed without verification: the server did not recognize the client and served the dest certificate) / `invalid_cert` (the certificate failed verification). No verdict when the handshake broke otherwise (reset, EOF) |
 | `transport` | Transport over TLS (XHTTP, gRPC, WS, HTTPUpgrade, H2) | type, mode, method, path, HTTP status |
-| `auth` | Authentication where the protocol confirms it (Hysteria2, TUIC, naive, TrustTunnel, MASQUE, SOCKS, HTTP CONNECT) | response status |
-| `wg_handshake` | WG/AWG handshake | new (time) or existing (age of the last one) |
+| `auth` | Authentication where the protocol confirms it (Hysteria2, TUIC, naive, TrustTunnel, MASQUE, SOCKS, HTTP CONNECT) | response status. MASQUE: `vhttp=h3` / `h2`, `status` (`2xx` on success: the transport does not return the exact code), `refused=access_denied` for a Cloudflare Access TLS alert; a dial over the live tunnel is `REUSED` with `tunnel=existing` and `age`. TrustTunnel: one stage per CONNECT, subject = authority (incl. `_udp2`, `_check`), `status`, `refused=authentication_required` when the server closes the session instead of answering 407; the session itself is `tls` (h2) or `quic` (h3) |
+| `wg_handshake` | WG/AWG handshake, recorded before each TCP connect inside the tunnel | subject = endpoint tag; `detour` = the endpoint's detour tag, when it has one; `handshake=new` with `peer`, the stage ending at the handshake time; `handshake=existing`, `REUSED` with `age`; `FAILED` "no handshake with the peer" when there is no session and the dial failed; `NOT_EVALUATED` with `handshake=unknown` when the peer status cannot be read |
 | `proxy_header` | Protocol header with no confirmation (VLESS, VMess, Trojan, Shadowsocks) | target; result is always `NO_ACK` |
 | `target_tls` | The test's TLS with the target through the tunnel | SNI, ALPN |
 | `first_byte` | First bytes of the target's response | — |
-| `http` | HTTP response | status, Content-Type, bytes |
+| `http` | HTTP response | status, Content-Type, bytes; `location` on a redirect |
 
 The stages of a test are the ones the pipeline actually ran. If a node sent
 the connection somewhere other than the user expected, the trace shows the
@@ -259,7 +261,9 @@ actual path, not the expected one.
    selection and detours are the production ones. Through a node
    (`outboundTag`) — the same path as `GetURLViaOutbound`, plus the trace.
 2. **Root cause.** Among `FAILED` stages, excluding lost-race siblings
-   (§5.13), take the one that finished first and has no failed
+   (§5.13) and failures inside a stage that ended OK after them (the step
+   recovered: a transport retried on its own, another server answered),
+   take the one that finished first and has no failed
    descendants: the deepest failure that stopped the pipeline. Stages
    that did not run because of it are `SKIPPED`. PLAN §4 implements this
    rule and no other.
@@ -278,9 +282,13 @@ actual path, not the expected one.
    - DNS servers open new connections;
    - node transports open new connections where the protocol allows it.
 
-   The test does not tear down or restart WG/AWG endpoints and multiplexes
-   of external modules: their stages are `REUSED` with the age of the
-   connection or of the last handshake.
+   The test does not tear down or restart WG/AWG endpoints, MASQUE tunnels,
+   TrustTunnel sessions and the connections of external modules: their
+   stages are `REUSED` with the age of the connection or of the last
+   handshake. Where reuse cannot be controlled at all (Hysteria, Hysteria2,
+   TUIC, naive, AnyTLS, `multiplex.enabled`, the gRPC transport, MASQUE,
+   TrustTunnel), the
+   stage carries `reuse=uncontrolled` under `fresh`.
 7. **The test does not change group state:** selector choice, urltest
    history, failover penalties and degradation, `round_robin` stickiness.
 8. **Through the router the test connection is visible** in the connection
@@ -299,7 +307,15 @@ actual path, not the expected one.
 13. **Parallel dials.** When the dialer races several addresses or
     interfaces, the siblings that lost the race are `SKIPPED` with the
     attribute `lost_race=<winner stage id>`, not `FAILED`, and are never
-    the root cause.
+    the root cause. The same holds for the participants of a DNS group's
+    fan (rescue fan, fastest election, parallel mode): a participant that
+    ends after the winner answered is `SKIPPED` with
+    `lost_race=<winner's dns_member id>`. Inside its subtree, a `tls`
+    handshake or a `dns` lookup that ends on the request's cancelled
+    context is `SKIPPED` with `lost_race=0` (the winner is not known at
+    that level). A member that failed on its own before the winner
+    answered stays `FAILED`, and so does a stage that ran out of time
+    (item 11).
 14. **The test owns its connections.** Every connection the test opened,
     including those forced by `fresh`, is closed when the test ends and
     never enters a production pool (XHTTP transport pool, DNS connection
@@ -314,23 +330,27 @@ The core computes findings from the trace and the core state and returns
 them as codes with stage references and attributes. The client writes the
 text. The vocabulary is open, like the stage vocabulary.
 
-| Code | When |
-|------|------|
-| `excluded_from_vpn` | The source does not enter the tunnel (`include_package` / `exclude_package` of TUN). The path in the trace is hypothetical |
-| `resolve_via_rules_in_source_context` | The node's server address is resolved by DNS rules in the source context (the node has a detour and no `domain_resolver`). For another source the resolve path may differ |
-| `dependency_outside_route` | The path depends on a node that is not on the route (e.g. a DNS server's detour). Attributes: the node and what depends on it |
-| `resolve_cycle` | A resolve cycle was found (§5.5) |
-| `ip_rules_not_evaluated` | Address rules were not evaluated: the address is unknown (fakeip, a domain without `resolve`) |
-| `fakeip_not_persisted` | fakeip is not persisted across restarts: after a restart, apps with cached addresses get a refusal |
-| `fakeip_pool_wrapped` | The fakeip pool wrapped faster than the answer TTL: an old address may have gone to a new domain. Attributes: range size, wrap time, TTL |
-| `fakeip_unknown_address` | `connectIP` is in the fakeip range and has no record |
-| `fakeip_address_reassigned` | `connectIP` currently belongs to another domain |
-| `fakeip_ipv6_without_tun_ipv6` | AAAA returns IPv6 fakeip, but TUN has no IPv6 address |
-| `https_query_rejected` | The HTTPS DNS query is rejected by a rule: the client gets no ECH and no ALPN hints |
-| `quic_rejected` | `udp/443` is rejected by a rule: the browser falls back to TCP |
-| `reality_not_recognized` | Verdict `dest_cert`. Possible causes (indistinguishable): `public_key`, `short_id`, SNI outside `server_names`, client version |
-| `failed_after_no_ack` | The connection broke after a `NO_ACK` stage. Possible causes: wrong UUID/password, the server could not reach the target, large packets lost (MTU) |
-| `partially_reused` | The path was completed, but some stages are `REUSED`: the result does not prove the path comes up from scratch |
+Levels: `info` — a fact about the path; `warning` — the path works, but
+may break for another source, after a restart or later; `problem` — a
+cause of the failure.
+
+| Code | Level | When |
+|------|-------|------|
+| `excluded_from_vpn` | warning | The source does not enter the tunnel (`include_package` / `exclude_package` of TUN). The path in the trace is hypothetical |
+| `resolve_via_rules_in_source_context` | info | The node's server address is resolved by DNS rules in the source context (the node has a detour and no `domain_resolver`). For another source the resolve path may differ |
+| `dependency_outside_route` | info; `problem` when the root cause is inside that node's subtree | The path depends on a node that is not on the route (e.g. a DNS server's detour). Attributes: the node and what depends on it |
+| `resolve_cycle` | problem | A resolve cycle was found (§5.5) |
+| `ip_rules_not_evaluated` | warning | Address rules were not evaluated: the address is unknown (fakeip, a domain without `resolve`) |
+| `fakeip_not_persisted` | warning | fakeip is not persisted across restarts: after a restart, apps with cached addresses get a refusal |
+| `fakeip_pool_wrapped` | warning | The fakeip pool wrapped faster than the answer TTL: an old address may have gone to a new domain. Attributes: range size, wrap time, TTL |
+| `fakeip_unknown_address` | problem | `connectIP` is in the fakeip range and has no record |
+| `fakeip_address_reassigned` | problem | `connectIP` currently belongs to another domain |
+| `fakeip_ipv6_without_tun_ipv6` | warning | AAAA returns IPv6 fakeip, but TUN has no IPv6 address |
+| `https_query_rejected` | info | The HTTPS DNS query is rejected by a rule: the client gets no ECH and no ALPN hints |
+| `quic_rejected` | info | `udp/443` is rejected by a rule: the browser falls back to TCP |
+| `reality_not_recognized` | problem | Verdict `dest_cert`. Possible causes (indistinguishable): `public_key`, `short_id`, SNI outside `server_names`, client version |
+| `failed_after_no_ack` | problem | The connection broke after a `NO_ACK` stage. Possible causes: wrong UUID/password, the server could not reach the target, large packets lost (MTU) |
+| `partially_reused` | info | The path was completed, but some stages are `REUSED`: the result does not prove the path comes up from scratch |
 
 ## 7. Boundaries
 
@@ -359,6 +379,28 @@ text. The vocabulary is open, like the stage vocabulary.
   `uid` stays 0 and `user_id` rules do not match.
 - **`source_port` rules are not covered:** the test's source port is
   ephemeral.
+- **Inside a WG/AWG endpoint.** Its outer UDP is dialed by `wireguard-go`
+  on the endpoint's own context and its peer domains resolve at start, so
+  the endpoint's own detour and peer lookup never show in a trace: `wake`
+  is a leaf, `wg_handshake` its sibling. `wg_handshake` names the detour
+  (`detour`), so a handshake that times out points at the detour to test
+  next. `wg_handshake` is recorded only
+  for TCP: a UDP socket sends nothing to trigger a handshake. Inner TCP
+  connects inside MASQUE's userspace stack are not traced.
+- **Hysteria2 and TUIC** (sing-quic) open the QUIC connection on the
+  client's own long-lived context, so the hop's socket, its detour and its
+  `domain_resolver` lookup never show: the hop is one opaque `dial` stage,
+  classified by the error on failure (`class=auth` / `quic`; Hysteria2
+  answers a wrong password with 404 to look like a web server). Not planned:
+  the client keeps that connection alive, so a test usually runs through an
+  existing one with nothing to trace; the error classification answers
+  the two common questions (wrong password, QUIC blocked); and seeing
+  inside would mean forking sing-quic as a fifth submodule for the trace
+  alone. To be revisited if field cases show the classification sending
+  users the wrong way.
+- **Approximate findings.** `quic_rejected` for a TCP test matches the
+  rules against `udp/443` without sniffing or resolving; `fakeip_pool_wrapped`
+  compares with the default answer TTL (600 s), not `rewrite_ttl`.
 - **Early-handshake protocols at `DEPTH_CONNECT`.** VLESS, Trojan and
   Shadowsocks send their header together with the first payload. With no
   request there is no payload, so the trace has no `proxy_header` stage at
@@ -382,7 +424,9 @@ text. The vocabulary is open, like the stage vocabulary.
    path with `fresh = true` runs them, and the DNS cache is unchanged after
    the test.
 5. REALITY: a wrong `public_key` gives `dest_cert` and
-   `reality_not_recognized`; a correct one gives `accepted`.
+   `reality_not_recognized` when the dest certificate is publicly trusted
+   (with an untrusted one — e.g. a self-signed stand — the verdict is
+   `invalid_cert`); a correct one gives `accepted`.
 6. A package excluded in TUN gives `excluded_from_vpn`.
 7. `connectIP` from the fakeip range without a record gives `route`
    `FAILED` and `fakeip_unknown_address`; with another domain's record —
@@ -402,7 +446,7 @@ the user without waiting for the whole stage vocabulary.
 
 | Release | Content | Acceptance criteria |
 |-------|---------|---------------------|
-| 1 | Protocol, trace holder, both paths (router and node), all depths, `appDNS`, `connectIP` without fakeip findings; stages `app_dns`, `route`, `group`, `chain`, `dial`, `detour`, `lookup`, `dns`, `tcp_connect`, `tls`, `transport` (XHTTP), `proxy_header`, `target_tls`, `first_byte`, `http`; root cause, resolve-cycle detection, libbox, CLI. No findings | 1, 3, 8, 9, 10, 11; criterion 2 without the finding |
+| 1 | Protocol, trace holder, both paths (router and node), all depths, `appDNS`, `connectIP` without fakeip findings; stages `app_dns`, `route`, `group`, `chain`, `dial`, `detour`, `lookup`, `dns`, `tcp_connect`, `udp`, `tls`, `transport` (XHTTP), `proxy_header`, `target_tls`, `first_byte`, `http`; root cause, resolve-cycle detection, libbox, CLI. No findings | 1, 3, 8, 9, 10, 11; criterion 2 without the finding |
 | 2 | `fresh` at nested levels with `REUSED` ages, `reality` verdict, `wake`, `wg_handshake`, `auth` and `quic` stages, fakeip state, all findings of §6 | 2 (the finding), 4, 5, 6, 7 |
 
 Release 1 closes #59 and gives the LxBox screen its data. Release 2 is scoped
@@ -426,13 +470,14 @@ a nil-safe call that costs one `ctx.Value` check without a trace:
 | `common/dialer/default.go`, `detour.go`, `resolve.go` | 1 | 8 / 4 / 4 lines (`tcp_connect`/`udp` incl. interface-strategy paths; `detour` in `DialContext` and `ListenPacket`; `lookup` in four resolve paths) |
 | `common/tls/client.go` | 1 | 2 lines (`tls` begin/end in `ClientHandshake`) |
 | `dns/router.go` | 1 | 3 lines (matched DNS rule: rule walk, legacy loop, `final`) |
-| `protocol/wireguard/endpoint.go` | 1 | 6 lines (`lookup` by rules in `DialContext` and `ListenPacketWithDestination`; `tcp_connect`/`udp` inside the tunnel via `netstackLx` on four dial calls) |
+| `protocol/wireguard/endpoint.go` | 1, 2 | 6 lines (`lookup` by rules in `DialContext` and `ListenPacketWithDestination`; `tcp_connect`/`udp` inside the tunnel via `netstackLx` on four dial calls); 1 line (`wake` in `resumeOnDial`, inside the lx idle-suspend block) |
 | `protocol/group/urltest.go` | 1 | 6 changed lines on already lx-marked calls (probe-aware pick, history and penalty reset; `group` stage) |
-| `dns/client.go` | 1 | 1 line (`dns` stage begin in `beginExchange`; release 2 adds `fresh`) |
-| `common/tls/reality_client.go` | 2 | 1 (already carries lx edits) |
-| `dns/transport/conn_pool.go` | 1 | 1 field + 4 lines (probe-owned connections are not parked on release — §5.14, criterion 10) |
+| `dns/client.go` | 5 | 1 line (`dns` stage begin in `beginExchange`), 2 lines (cache age at the cache hits of `beginExchange` and `questionCache`), 2 lines (`fresh`: `DisableCache` in `beginExchange` and `Lookup`) |
+| `common/tls/reality_client.go` | 2 | 1 line after `HandshakeContext` (the file already carries lx edits) |
+| `dns/transport/conn_pool.go` | 1, 2 | 1 field + 15 lines: probe-owned connections are not parked on release (§5.14, criterion 10); `fresh` takes a connection of its own (2 blocks of 3 lines in `acquireShared` / `acquireOrdered`); reuse marks at the pooled and joined paths (3 lines) |
 | `protocol/group/urltest.go` (hotfix) | 1 | `selectedOutbound*` behind `selectedAccess`: a data race exposed by SPEC 136, registered in [HOTFIXES](../../FEATURES/004-HOTFIXES/FEATURE.md) |
-| `dns/transport/fakeip/store.go` | 2 | 1 |
+| `dns/transport/fakeip/store.go` | 2 | 1 line in `Create` (pool-wrap counter; per new address one weak pointer and one map read, no trace needed) |
+| `dns/transport/https.go`, `dns/transport/quic/http3.go` | 2 | 2 lines each where the exchange takes its client: under `fresh` a one-off DoH / DoH3 client, closed after the exchange (their connections live in the HTTP client, not in the pool); 1 changed line in `https.go`: a fresh query's timeout does not reset the production client |
 
 A consumer-side alternative does not exist: the route decision, sniffing,
 group selection and nested resolves are visible only inside the core, and
@@ -470,21 +515,21 @@ the trace like this (left column — `startMs`, right — `durationMs`):
   61            · proxy_header (NO_ACK)
   61          ✓ tls          dns.example.org · h2                                        79
  140          ✓ transport    POST /dns-query → 200                                       38
- 178      ✓ wake    awg-de, slept 12 min
- 178        ✓ lookup  de.example.net → 192.0.2.77   domain_resolver dns-remote           33
- 211        ✓ dial    hy2-fi
- 211          ✓ lookup  fi.example.net → 203.0.113.9   domain_resolver dns-boot          19
- 230          ✓ quic + auth   203.0.113.9:443 · salamander · 233                        109
- 340        ✓ wg_handshake  new                                                         81
- 421      ✓ tcp_connect  198.51.100.20:443 inside awg-de                                66
- 487    ✓ tls          uTLS chrome · SNI www.microsoft.com · X25519MLKEM768             74
- 561    ✓ reality      accepted
- 561    ✓ transport    XHTTP stream-one · POST /xh/ → 200                               67
- 628    · proxy_header VLESS → www.youtube.com:443 (NO_ACK)
- 628  ✓ target_tls    www.youtube.com                                                  147
- 775  ✓ first_byte                                                                      67
- 842  ✓ http          204
+ 178      ✓ wake          awg-de · slept 720 s · resume                                2
+ 180      ✓ wg_handshake  awg-de · new                                                81
+ 261      ✓ tcp_connect  198.51.100.20:443 inside awg-de                                66
+ 327    ✓ tls          uTLS chrome · SNI www.microsoft.com · X25519MLKEM768             74
+ 401      ✓ reality    accepted
+ 401    ✓ transport    XHTTP stream-one · POST /xh/ → 200                               67
+ 468    · proxy_header VLESS → www.youtube.com:443 (NO_ACK)
+ 468  ✓ target_tls    www.youtube.com                                                  147
+ 615  ✓ first_byte                                                                      67
+ 682  ✓ http          204
 
 findings: resolve_via_rules_in_source_context (stage lookup nl.example.net),
-          https_query_rejected, dependency_outside_route (ss-pl → addresses of vless-nl, awg-de)
+          https_query_rejected, dependency_outside_route (ss-pl → address of vless-nl)
 ```
+
+The detour `hy2-fi` of `awg-de` and the lookup of `de.example.net` are not
+in the trace: the endpoint dials and resolves its peer on its own context
+(§7).

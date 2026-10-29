@@ -13,6 +13,7 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/dnstrack"
@@ -65,6 +66,73 @@ func traceExchangeBegin(ctx context.Context, transport adapter.DNSTransport, que
 	})
 }
 
+// traceFreshOptions sets DisableCache for every query of a connection test
+// with fresh=true (SPEC 139 §5.6): the cache is neither read nor written, at
+// any nesting level — a node's server address, a DNS server's own domain —
+// where the caller's options are not the test's to set. Without a trace it
+// costs one ctx.Value lookup, none when the cache is already off.
+func traceFreshOptions(ctx context.Context, options adapter.DNSQueryOptions) adapter.DNSQueryOptions {
+	if !options.DisableCache && lxtrace.Fresh(ctx) {
+		options.DisableCache = true
+	}
+	return options
+}
+
+type dnsCacheAgeKey struct{}
+
+// dnsCacheAge is the age of the cache entry a cache hit is served from. The
+// question keeps a nested exchange from picking up the age of another one.
+type dnsCacheAge struct {
+	question dns.Question
+	age      uint32
+}
+
+// traceCacheAge attaches the age of the cache entry under key to ctx for the
+// REUSED stage traceResponse records. The entry is read again: loadResponse
+// hands out a copy with the remaining TTL, while the stored message keeps the
+// TTL it was stored with, and stored TTL minus remaining lifetime is the age.
+func (c *Client) traceCacheAge(ctx context.Context, key dnsCacheKey) context.Context {
+	if lxtrace.From(ctx) == nil || c.disableExpire {
+		return ctx
+	}
+	var (
+		stored   *dns.Msg
+		expireAt time.Time
+	)
+	if c.dnsCache != nil {
+		rawMessage, entryExpireAt, loaded := c.dnsCache.LoadDNSCache(key.persistentName(), key.Name, key.Qtype)
+		if !loaded {
+			return ctx
+		}
+		stored = new(dns.Msg)
+		if stored.Unpack(rawMessage) != nil {
+			return ctx
+		}
+		expireAt = entryExpireAt
+	} else if c.cache != nil {
+		var loaded bool
+		stored, expireAt, loaded = c.cache.GetWithLifetimeNoExpire(key)
+		if !loaded {
+			return ctx
+		}
+	} else {
+		return ctx
+	}
+	for _, recordList := range [][]dns.RR{stored.Answer, stored.Ns, stored.Extra} {
+		for _, record := range recordList {
+			if record.Header().Rrtype == dns.TypeOPT {
+				continue
+			}
+			age := time.Duration(record.Header().Ttl)*time.Second - time.Until(expireAt)
+			return context.WithValue(ctx, dnsCacheAgeKey{}, &dnsCacheAge{
+				question: key.Question,
+				age:      uint32(max(age, 0) / time.Second),
+			})
+		}
+	}
+	return ctx
+}
+
 // ownStage returns the stage opened for this transport/question in ctx.
 func ownStage(ctx context.Context, transport adapter.DNSTransport, question dns.Question) *lxtrace.Stage {
 	state, _ := ctx.Value(dnsStageKey{}).(*dnsStageState)
@@ -105,6 +173,9 @@ func traceResponse(ctx context.Context, transport adapter.DNSTransport, response
 		} else {
 			stage.Attr("ttl", strconv.FormatUint(uint64(ttl), 10))
 		}
+		if cacheAge, loaded := ctx.Value(dnsCacheAgeKey{}).(*dnsCacheAge); loaded && cacheAge.question == question {
+			stage.Attr("cache_age", strconv.FormatUint(uint64(cacheAge.age), 10))
+		}
 		attrResponse(stage, response)
 		stage.Mark(lxtrace.Reused)
 	}
@@ -130,7 +201,9 @@ func traceFailed(ctx context.Context, transport adapter.DNSTransport, question d
 		stage.Attr("rcode", rcodeText(int(rcode)))
 	}
 	attrGroup(ctx, stage)
-	stage.End(errors.New(cause))
+	// A lookup cut short by a cancelled ctx (a DNS group member's own server
+	// domain, the request already answered by another member) lost a race.
+	stage.EndRace(ctx, errors.New(cause))
 }
 
 // traceDNSRule records the DNS rule the router matched on the enclosing stage

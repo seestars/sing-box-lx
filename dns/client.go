@@ -13,6 +13,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/compatible"
 	"github.com/sagernet/sing-box/common/dnstrack"
+	"github.com/sagernet/sing-box/common/interrupt"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -284,6 +285,7 @@ func (c *Client) beginExchange(ctx context.Context, transport adapter.DNSTranspo
 				return it.Option() == dns.EDNS0SUBNET
 			}))
 	message = c.prepareExchangeMessage(message, options)
+	options = traceFreshOptions(ctx, options) // lx: SPEC 139 — fresh: no cache read or write
 	disableCache := !isSimpleRequest || c.disableCache || options.DisableCache
 	operation := &exchangeOperation{
 		message:         message,
@@ -306,19 +308,24 @@ func (c *Client) beginExchange(ctx context.Context, transport adapter.DNSTranspo
 		}
 		for {
 			response, ttl, isStale := c.loadResponse(cacheKey)
-			if response != nil {
-				if isStale && !options.DisableOptimisticCache {
+			if response != nil && (!isStale || !options.DisableOptimisticCache) {
+				ctx = c.traceCacheAge(ctx, cacheKey) // lx: SPEC 139 — cache_age of the REUSED dns stage
+				operation.release()
+				if isStale {
 					c.backgroundRefreshDNS(transport, cacheKey, message.Copy(), options, responseChecker)
-					logOptimisticResponse(c.logger, ctx, transport, response) // lx: SPEC 018 (transport arg)
-					response.Id = message.Id
-					operation.release()
-					return nil, response, exchangeDone, nil
-				} else if !isStale {
-					logCachedResponse(c.logger, ctx, transport, response, ttl) // lx: SPEC 018 (transport arg)
-					response.Id = message.Id
-					operation.release()
-					return nil, response, exchangeDone, nil
 				}
+				if responseChecker != nil && !responseChecker(response) {
+					logRejectedResponse(c.logger, ctx, response)
+					emitFailedQuery(ctx, transport, question, dnstrack.RcodeNoAnswer, "rejected (cached)") // lx: SPEC 018
+					return nil, nil, exchangeDone, ErrResponseRejectedCached
+				}
+				if isStale {
+					logOptimisticResponse(c.logger, ctx, transport, response) // lx: SPEC 018 (transport arg)
+				} else {
+					logCachedResponse(c.logger, ctx, transport, response, ttl) // lx: SPEC 018 (transport arg)
+				}
+				response.Id = message.Id
+				return nil, response, exchangeDone, nil
 			}
 			if !loaded {
 				break
@@ -347,7 +354,7 @@ func (c *Client) beginExchange(ctx context.Context, transport adapter.DNSTranspo
 		operation.release()
 		return nil, nil, exchangeDone, E.New("DNS query loopback in transport[", contextTransport, "]")
 	}
-	operation.ctx = adapter.ContextWithDNSTransportTag(ctx, transport.Tag())
+	operation.ctx = adapter.ContextWithDNSTransportTag(interrupt.ContextWithIsExternalConnection(ctx, false), transport.Tag())
 	if transport.Type() == C.DNSTypeGroup { // lx: SPEC 035 — the group fills in the answering member + probe trace for stream attribution
 		operation.ctx = dnstrack.WithQueryTraceIfTracking(operation.ctx)
 	}
@@ -461,6 +468,7 @@ func (c *Client) ExchangeAsync(ctx context.Context, transport adapter.DNSTranspo
 func (c *Client) Lookup(ctx context.Context, transport adapter.DNSTransport, domain string, options adapter.DNSQueryOptions, responseChecker func(response *dns.Msg) bool) ([]netip.Addr, error) {
 	domain = FqdnToDomain(domain)
 	dnsName := dns.Fqdn(domain)
+	options = traceFreshOptions(ctx, options) // lx: SPEC 139 — fresh: no cache read or write
 	var strategy C.DomainStrategy
 	if options.LookupStrategy != C.DomainStrategyAsIS {
 		strategy = options.LookupStrategy
@@ -581,11 +589,19 @@ func (c *Client) questionCache(ctx context.Context, transport adapter.DNSTranspo
 	if response == nil {
 		return nil, ErrNotCached
 	}
+	ctx = c.traceCacheAge(ctx, cacheKey) // lx: SPEC 139 — cache_age of the REUSED dns stage
 	if isStale {
 		if options.DisableOptimisticCache {
 			return nil, ErrNotCached
 		}
 		c.backgroundRefreshDNS(transport, cacheKey, c.prepareExchangeMessage(message.Copy(), options), options, responseChecker)
+	}
+	if responseChecker != nil && !responseChecker(response) {
+		logRejectedResponse(c.logger, ctx, response)
+		emitFailedQuery(ctx, transport, question, dnstrack.RcodeNoAnswer, "rejected (cached)") // lx: SPEC 018
+		return nil, ErrResponseRejectedCached
+	}
+	if isStale {
 		logOptimisticResponse(c.logger, ctx, transport, response) // lx: SPEC 018 (transport arg)
 	} else {
 		// Fresh cache hit on the Lookup path: log/emit as SourceCached, mirroring the

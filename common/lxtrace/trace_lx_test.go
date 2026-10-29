@@ -5,6 +5,7 @@ package lxtrace
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/netip"
 	"strconv"
@@ -60,6 +61,7 @@ func TestNoTraceIsNoop(t *testing.T) {
 	nilStage.End(errors.New("x"))
 	nilStage.Mark(Reused)
 	nilStage.LostRace(nil)
+	nilStage.EndRace(context.Background(), errors.New("x"))
 	if nilStage.ID() != 0 {
 		t.Fatal("nil stage id must be 0")
 	}
@@ -205,7 +207,7 @@ func TestBeginLookupDetectsCycle(t *testing.T) {
 	if ctx3 != ctx2 {
 		t.Fatal("a cycle must not return a child ctx")
 	}
-	d.End(nil)
+	d.End(err) // the cycle error propagates up the lookups it is nested in
 	l1.End(err)
 	summary := trace.Finish(nil)
 	cycle := stageByID(summary, l2.ID())
@@ -518,8 +520,14 @@ func (o *testOutbound) DialContext(context.Context, string, M.Socksaddr) (net.Co
 func (o *testOutbound) ListenPacket(context.Context, M.Socksaddr) (net.PacketConn, error) {
 	return nil, errors.New("not dialable")
 }
-func (o *testOutbound) Now() string   { return o.now }
 func (o *testOutbound) All() []string { return []string{o.now} }
+func (o *testOutbound) Selected(string) adapter.Outbound {
+	if o.now == "" {
+		return nil
+	}
+	return &testOutbound{tag: o.now}
+}
+func (o *testOutbound) AttachConnection(io.Closer) func() { return func() {} }
 
 type testOutboundManager struct {
 	outbounds map[string]adapter.Outbound
@@ -691,7 +699,7 @@ func TestConcurrentBeginEnd(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
-	parent.End(nil)
+	parent.End(errors.New("boom below")) // under an OK parent the booms would count as recovered
 	summary := trace.Finish(nil)
 	if len(summary.Stages) != 1+50+50*20 {
 		t.Fatalf("stages: %d", len(summary.Stages))
@@ -730,5 +738,90 @@ func TestWithStageAndStageLookup(t *testing.T) {
 	}
 	if WithStage(ctx, nil) != ctx {
 		t.Fatal("WithStage(nil) must return ctx unchanged")
+	}
+}
+
+// A failure inside a stage that ended OK was recovered by that step (a
+// transport retrying on its own, a lookup answered by another server): it is
+// kept in the trace but is not the root cause; a later top-level failure is.
+func TestRootCauseSkipsRecoveredFailure(t *testing.T) {
+	trace := New(Options{})
+	ctx := With(context.Background(), trace)
+	dialCtx, dial := Begin(ctx, "dial", "masque")
+	_, h3 := Begin(dialCtx, "quic", "h3")
+	h3.End(errors.New("handshake timeout"))
+	_, h2 := Begin(dialCtx, "auth", "h2")
+	h2.End(nil)
+	dial.End(nil)
+	_, firstByte := Begin(ctx, "first_byte", "target")
+	firstByte.End(errors.New("timeout"))
+	summary := trace.Finish(nil)
+	if summary.RootCause != firstByte.ID() {
+		t.Fatalf("root = %d, want first_byte %d, not the recovered h3 attempt %d", summary.RootCause, firstByte.ID(), h3.ID())
+	}
+	if attempt := stageByID(summary, h3.ID()); attempt.Result != Failed {
+		t.Fatalf("the recovered attempt must stay FAILED in the trace: %+v", attempt)
+	}
+
+	// A failure that ends after its ancestor's OK is not recovered: the XHTTP
+	// transport returns before the server refuses the response.
+	trace = New(Options{})
+	ctx = With(context.Background(), trace)
+	transportCtx, transport := Begin(ctx, "transport", "xhttp")
+	_, response := Begin(transportCtx, "transport_response", "xhttp")
+	transport.End(nil)
+	time.Sleep(time.Millisecond)
+	response.End(errors.New("status 403"))
+	if root := trace.Finish(nil).RootCause; root != response.ID() {
+		t.Fatalf("root = %d, want the late refusal %d", root, response.ID())
+	}
+
+	trace = New(Options{})
+	ctx = With(context.Background(), trace)
+	dialCtx, dial = Begin(ctx, "dial", "masque")
+	_, h3 = Begin(dialCtx, "quic", "h3")
+	h3.End(errors.New("handshake timeout"))
+	dial.End(errors.New("dial failed"))
+	if root := trace.Finish(nil).RootCause; root != h3.ID() {
+		t.Fatalf("root = %d, want the h3 attempt %d when the dial failed", root, h3.ID())
+	}
+}
+
+// EndRace: a failure on a cancelled ctx lost a race (§5.13); a timeout and a
+// failure on a live ctx stay Failed; success is OK whatever the ctx.
+func TestEndRace(t *testing.T) {
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	timedOut, cancelTimeout := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelTimeout()
+	for _, testCase := range []struct {
+		name     string
+		ctx      context.Context
+		err      error
+		want     Result
+		lostRace bool
+	}{
+		{"cancelled", cancelled, context.Canceled, Skipped, true},
+		{"cancelled, other error", cancelled, io.EOF, Skipped, true},
+		{"timed out", timedOut, context.DeadlineExceeded, Failed, false},
+		{"live ctx", context.Background(), io.EOF, Failed, false},
+		{"success on cancelled", cancelled, nil, OK, false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			trace := New(Options{})
+			_, stage := Begin(With(context.Background(), trace), "tls", "example.com")
+			stage.EndRace(testCase.ctx, testCase.err)
+			summary := trace.Finish(nil)
+			snapshot := stageByID(summary, stage.ID())
+			if snapshot.Result != testCase.want {
+				t.Fatalf("result = %v, want %v", snapshot.Result, testCase.want)
+			}
+			if _, ok := attrOf(snapshot, "lost_race"); ok != testCase.lostRace {
+				t.Fatalf("lost_race = %v, want %v: %+v", ok, testCase.lostRace, snapshot)
+			}
+			if testCase.lostRace && summary.RootCause != 0 {
+				t.Fatalf("a lost race is never the root: %d", summary.RootCause)
+			}
+		})
 	}
 }

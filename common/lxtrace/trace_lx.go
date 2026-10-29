@@ -384,6 +384,23 @@ func (s *Stage) LostRace(winner *Stage) {
 	s.finish(Skipped, "")
 }
 
+// EndRace closes the stage like End, except that a failure while ctx is
+// cancelled — not timed out — is a loser of a race a sibling won, such as a
+// DNS group's parallel query answered by another member: the request's ctx is
+// cancelled once the answer is in, cutting the others' handshakes and lookups
+// short. It ends Skipped with lost_race (§5.13); the winner is not known here,
+// so lost_race carries 0. A timeout stays Failed (§5.11).
+func (s *Stage) EndRace(ctx context.Context, err error) {
+	if s == nil {
+		return
+	}
+	if err != nil && errors.Is(ctx.Err(), context.Canceled) {
+		s.LostRace(nil)
+		return
+	}
+	s.End(err)
+}
+
 // finish closes the stage once; later calls are ignored.
 func (s *Stage) finish(result Result, errText string) {
 	s.finishAt(result, errText, time.Now(), nil)
@@ -409,6 +426,22 @@ func (s *Stage) finishAt(result Result, errText string, now time.Time, extra *At
 	snapshot := s.snapshotLocked()
 	s.access.Unlock()
 	s.trace.emit(s, snapshot, true)
+}
+
+// Children returns snapshots of the direct children of s, in begin order.
+func (s *Stage) Children() []StageSnapshot {
+	if s == nil {
+		return nil
+	}
+	s.trace.access.Lock()
+	defer s.trace.access.Unlock()
+	var children []StageSnapshot
+	for _, stage := range s.trace.stages {
+		if stage.parent == s {
+			children = append(children, stage.snapshot())
+		}
+	}
+	return children
 }
 
 func (s *Stage) snapshot() StageSnapshot {
@@ -515,16 +548,40 @@ func (t *Trace) RouteRecorded() bool {
 }
 
 // rootCause implements SPEC 139 §5.2: among Failed stages that did not lose a
-// race, the one that finished first and has no Failed descendant. Ties by end
-// time go to the deeper stage, then to the smaller id.
+// race and were not recovered by an ancestor that ended OK after them, the one that finished
+// first and has no Failed descendant. Ties by end time go to the deeper stage,
+// then to the smaller id.
 func rootCause(stages []*Stage) uint32 {
 	failed := make(map[uint32]bool, len(stages))
+	ends := make(map[uint32]time.Time, len(stages))
+	succeeded := make(map[uint32]time.Time, len(stages))
 	for _, s := range stages {
 		s.access.Lock()
 		if s.result == Failed && !s.hasAttr("lost_race") {
 			failed[s.id] = true
+			ends[s.id] = s.end
+		}
+		if s.result == OK {
+			succeeded[s.id] = s.end
 		}
 		s.access.Unlock()
+	}
+	// A failure inside a stage that ended OK after it was recovered by that
+	// step: a transport that retried on its own (MASQUE h3 falling back to h2,
+	// TrustTunnel replacing a stale session), a lookup answered by another
+	// server. It stays in the trace but is not what stopped the pipeline. A
+	// failure that ends after its ancestor's OK (an XHTTP response refused
+	// once the lazily dialed transport returned) is not recovered.
+	for _, s := range stages {
+		if !failed[s.id] {
+			continue
+		}
+		for ancestor := s.parent; ancestor != nil; ancestor = ancestor.parent {
+			if end, ok := succeeded[ancestor.id]; ok && !end.Before(ends[s.id]) {
+				delete(failed, s.id)
+				break
+			}
+		}
 	}
 	if len(failed) == 0 {
 		return 0
@@ -685,7 +742,7 @@ func unfoldSelectors(ctx context.Context, t *Trace, outbound adapter.Outbound) {
 			return
 		}
 		seen[outbound.Tag()] = true
-		selected := group.Now()
+		selected := adapter.GroupNow(group)
 		_, s := Begin(ctx, "group", outbound.Tag())
 		s.Attr("type", outbound.Type())
 		s.Attr("selected", selected)

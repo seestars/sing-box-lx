@@ -5,10 +5,8 @@ import (
 	"context"
 	"errors"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -82,15 +80,14 @@ func NewHTTPS(ctx context.Context, logger log.ContextLogger, tag string, options
 			host = options.Server
 		}
 	}
-	destinationURL := url.URL{
-		Scheme: "https",
-		Host:   host,
-	}
-	if destinationURL.Host == "" {
-		destinationURL.Host = options.Server
-	}
+	destinationAddress := M.ParseSocksaddrHostPort(host, options.ServerPort)
+	destinationURL := url.URL{Scheme: "https"}
 	if options.ServerPort != 0 && options.ServerPort != 443 {
-		destinationURL.Host = net.JoinHostPort(destinationURL.Host, strconv.Itoa(int(options.ServerPort)))
+		destinationURL.Host = destinationAddress.String()
+	} else if destinationAddress.IsIPv6() {
+		destinationURL.Host = "[" + destinationAddress.AddrString() + "]"
+	} else {
+		destinationURL.Host = destinationAddress.AddrString()
 	}
 	path := options.Path
 	if path == "" {
@@ -193,7 +190,7 @@ func (t *HTTPSTransport) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS
 		t.CloseIdleConnections()
 	}
 	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
+		if errors.Is(err, context.DeadlineExceeded) && !isFreshLx(ctx) { // lx: SPEC 139 — a fresh query's timeout is not the production client's
 			t.transportAccess.Lock()
 			defer t.transportAccess.Unlock()
 			if t.transportResetAt.After(startAt) {
@@ -233,6 +230,8 @@ func (t *HTTPSTransport) exchange(ctx context.Context, message *mDNS.Msg) (*mDNS
 	t.transportAccess.Lock()
 	currentTransport := t.transport
 	t.transportAccess.Unlock()
+	currentTransport, releaseTransport := t.freshTransportLx(ctx, currentTransport) // lx: SPEC 139 — fresh: a one-off client, closed after the exchange
+	defer releaseTransport()                                                        // lx: SPEC 139
 	response, err := currentTransport.RoundTrip(request)
 	requestBuffer.Release()
 	if err != nil {
