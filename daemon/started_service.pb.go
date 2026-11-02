@@ -756,8 +756,11 @@ type Status struct {
 	Downlink         int64                  `protobuf:"varint,7,opt,name=downlink,proto3" json:"downlink,omitempty"`
 	UplinkTotal      int64                  `protobuf:"varint,8,opt,name=uplinkTotal,proto3" json:"uplinkTotal,omitempty"`
 	DownlinkTotal    int64                  `protobuf:"varint,9,opt,name=downlinkTotal,proto3" json:"downlinkTotal,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// lx: SPEC 148 — memory held by the Go runtime (runtime/metrics total − released),
+	// the quantity debug.SetMemoryLimit governs; `memory` stays the process RSS.
+	MemoryRuntime uint64 `protobuf:"varint,10,opt,name=memoryRuntime,proto3" json:"memoryRuntime,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Status) Reset() {
@@ -849,6 +852,13 @@ func (x *Status) GetUplinkTotal() int64 {
 func (x *Status) GetDownlinkTotal() int64 {
 	if x != nil {
 		return x.DownlinkTotal
+	}
+	return 0
+}
+
+func (x *Status) GetMemoryRuntime() uint64 {
+	if x != nil {
+		return x.MemoryRuntime
 	}
 	return 0
 }
@@ -10205,12 +10215,19 @@ type PeerStatus struct {
 	// Current remote ip:port: configured, or learned from the peer's packets
 	// (server side, roaming). Last known address; empty until known.
 	Endpoint string `protobuf:"bytes,2,opt,name=endpoint,proto3" json:"endpoint,omitempty"`
-	// Unix seconds of the last completed handshake; 0 = none yet.
+	// Unix seconds of the last completed handshake of the current session; 0 =
+	// none yet. A session starts at the device build and at every Up after a
+	// Down (enable, wake from sleep, network wake); an older handshake belongs
+	// to destroyed keys and is not reported (SPEC 145).
 	LastHandshakeUnix int64 `protobuf:"varint,3,opt,name=lastHandshakeUnix,proto3" json:"lastHandshakeUnix,omitempty"`
-	RxBytes           int64 `protobuf:"varint,4,opt,name=rxBytes,proto3" json:"rxBytes,omitempty"`
-	TxBytes           int64 `protobuf:"varint,5,opt,name=txBytes,proto3" json:"txBytes,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// Device totals since it was built, service traffic included.
+	RxBytes int64 `protobuf:"varint,4,opt,name=rxBytes,proto3" json:"rxBytes,omitempty"`
+	TxBytes int64 `protobuf:"varint,5,opt,name=txBytes,proto3" json:"txBytes,omitempty"`
+	// Since the start of the current session (SPEC 145).
+	SessionRxBytes int64 `protobuf:"varint,6,opt,name=sessionRxBytes,proto3" json:"sessionRxBytes,omitempty"`
+	SessionTxBytes int64 `protobuf:"varint,7,opt,name=sessionTxBytes,proto3" json:"sessionTxBytes,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *PeerStatus) Reset() {
@@ -10274,6 +10291,20 @@ func (x *PeerStatus) GetRxBytes() int64 {
 func (x *PeerStatus) GetTxBytes() int64 {
 	if x != nil {
 		return x.TxBytes
+	}
+	return 0
+}
+
+func (x *PeerStatus) GetSessionRxBytes() int64 {
+	if x != nil {
+		return x.SessionRxBytes
+	}
+	return 0
+}
+
+func (x *PeerStatus) GetSessionTxBytes() int64 {
+	if x != nil {
+		return x.SessionTxBytes
 	}
 	return 0
 }
@@ -10523,7 +10554,7 @@ const file_daemon_started_service_proto_rawDesc = "" +
 	"\x05level\x18\x01 \x01(\x0e2\x10.daemon.LogLevelR\x05level\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\"9\n" +
 	"\x0fDefaultLogLevel\x12&\n" +
-	"\x05level\x18\x01 \x01(\x0e2\x10.daemon.LogLevelR\x05level\"\xb6\x02\n" +
+	"\x05level\x18\x01 \x01(\x0e2\x10.daemon.LogLevelR\x05level\"\xdc\x02\n" +
 	"\x06Status\x12\x16\n" +
 	"\x06memory\x18\x01 \x01(\x04R\x06memory\x12\x1e\n" +
 	"\n" +
@@ -10535,7 +10566,9 @@ const file_daemon_started_service_proto_rawDesc = "" +
 	"\x06uplink\x18\x06 \x01(\x03R\x06uplink\x12\x1a\n" +
 	"\bdownlink\x18\a \x01(\x03R\bdownlink\x12 \n" +
 	"\vuplinkTotal\x18\b \x01(\x03R\vuplinkTotal\x12$\n" +
-	"\rdownlinkTotal\x18\t \x01(\x03R\rdownlinkTotal\"-\n" +
+	"\rdownlinkTotal\x18\t \x01(\x03R\rdownlinkTotal\x12$\n" +
+	"\rmemoryRuntime\x18\n" +
+	" \x01(\x04R\rmemoryRuntime\"-\n" +
 	"\x06Groups\x12#\n" +
 	"\x05group\x18\x01 \x03(\v2\r.daemon.GroupR\x05group\"\xc2\x01\n" +
 	"\x05Group\x12\x10\n" +
@@ -11276,14 +11309,16 @@ const file_daemon_started_service_proto_rawDesc = "" +
 	"\x03tag\x18\x01 \x01(\tR\x03tag\x12\x18\n" +
 	"\aenabled\x18\x02 \x01(\bR\aenabled\"2\n" +
 	"\x1aSetEndpointEnabledResponse\x12\x14\n" +
-	"\x05state\x18\x01 \x01(\tR\x05state\"\xa8\x01\n" +
+	"\x05state\x18\x01 \x01(\tR\x05state\"\xf8\x01\n" +
 	"\n" +
 	"PeerStatus\x12\x1c\n" +
 	"\tpublicKey\x18\x01 \x01(\tR\tpublicKey\x12\x1a\n" +
 	"\bendpoint\x18\x02 \x01(\tR\bendpoint\x12,\n" +
 	"\x11lastHandshakeUnix\x18\x03 \x01(\x03R\x11lastHandshakeUnix\x12\x18\n" +
 	"\arxBytes\x18\x04 \x01(\x03R\arxBytes\x12\x18\n" +
-	"\atxBytes\x18\x05 \x01(\x03R\atxBytes\"*\n" +
+	"\atxBytes\x18\x05 \x01(\x03R\atxBytes\x12&\n" +
+	"\x0esessionRxBytes\x18\x06 \x01(\x03R\x0esessionRxBytes\x12&\n" +
+	"\x0esessionTxBytes\x18\a \x01(\x03R\x0esessionTxBytes\"*\n" +
 	"\x16WireGuardStatusRequest\x12\x10\n" +
 	"\x03tag\x18\x01 \x01(\tR\x03tag\"\xb7\x01\n" +
 	"\x17WireGuardEndpointStatus\x12 \n" +
