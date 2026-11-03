@@ -28,6 +28,46 @@ required for stable tags); this changelog section is the fallback used for pre-r
 > тогда. Пользовательские ноты билингвальны там, где это важно, — в
 > [`releases/`](releases/).
 
+#### v1.14.4-lx.30
+
+Stable после `v1.14.4-lx.29`, сводит `rc.1`–`rc.3` и три правки после `rc.3`. База — sing-box `v1.14.4`, `upstream/stable` `c005f3530`, дрейф 0, сабмодули и Go 1.26.10 не менялись; `go.mod` — бамп `rc.1` (полная релизная сборка прошла на `rc.1`–`rc.3`). Содержимое `rc.N` — в их разделах ниже; здесь только то, что изменилось после `rc.3`.
+
+- 🔧 **`lx.quic_sniff_decoy` — режимы вместо bool ([SPEC 151](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/151-QUIC_SNIFF_DECOY/SPEC.md) §4).** `"off"` (по умолчанию, как и отсутствие ключа), `"direct"` — только дозвоны на собственном сокете устройства (без `detour` или с `detour` на `direct`), `"detour"` — только дозвоны через другой outbound, `"all"`. Путь различается по тому, что лежит под QUIC: сокет ядра или conn другого outbound (та же проверка, что у усечения SPEC 150). `true`/`false` из `rc.3` принимаются и канонизируются в `"all"`/`"off"`; другая строка — ошибка загрузки. Стенд xr: `detour` через сниффящий релей 5/5, `direct` через тот же релей 0/5 (обманки на этом пути нет — так и задумано), `direct` без релея 5/5.
+- ⚠️ **Удалена env-переменная `LX_QUIC_SNIFF_DECOY`** (была в `rc.3` как отладочный оверрайд). Единственный выключатель — ключ.
+- ⚠️ **Удалены алиасы `route.lx_idle_suspend`, `route.lx_idle_suspend_reachable`, `route.lx_idle_teardown`** (SPEC 098, SPEC 020). Конфиг с ними не стартует: `unknown field`. Писать `lx.wg.idle_suspend`, `lx.wg.idle_suspend_reachable`, `lx.wg.idle_teardown`. `option/route.go` снова совпадает с апстримом байт в байт. LxBox и лаунчеру — проверить, что они пишут только `lx.wg.*`.
+
+#### v1.14.4-lx.30-rc.3
+
+Пререлиз после `v1.14.4-lx.30-rc.2`. База та же — sing-box `v1.14.4`, `upstream/stable` `c005f3530`, дрейф 0, сабмодули, `go.mod` и Go 1.26.10 не менялись. Одна тема: QUIC через чужой релей, который сниффит SNI (SPEC 151).
+
+- 🆕 **QUIC-узлы через релей со сниффингом Xray ([SPEC 151](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/151-QUIC_SNIFF_DECOY/SPEC.md)).** Релей с Xray `sniffing` (`destOverride` с `quic`, без `routeOnly`) расшифровывал QUIC Initial, брал SNI и уводил поток на это имя: masque h3 падал с `different public key than pinned`, hysteria2/tuic с подставным SNI попадали на чужой хост. h2 через те же релеи работал (SPEC 060).
+  - Ключ `lx.quic_sniff_decoy` (bool, по умолчанию выключен): каждый дозвон masque h3, hysteria2 и tuic шлёт один байт `0x00` перед первым Initial. Xray решает по первой датаграмме потока — QUIC-сниффер выбывает, назначение остаётся набранным. Сервер отбрасывает байт не разбирая (снят fixed bit QUIC). Без задержки и лишнего хендшейка. Отладка: `LX_QUIC_SNIFF_DECOY=1`/`0` сильнее ключа.
+  - Стенд против Xray `v26.10.31`: masque h3 → WARP 0/5 → 5/5 (хендшейк 454–478 мс), 2 минуты жизни 12/12 без обрывов; hysteria2 и tuic на loopback 0/4 → 4/4. Port hopping hysteria2 (`server_ports`) не покрыт.
+  - Прототип задержки второго Initial (SPEC 150 §3.2, `LX_H3_INITIAL_DELAY`) удалён: он стоил ~200 мс на хендшейк.
+
+#### v1.14.4-lx.30-rc.2
+
+Пререлиз после `v1.14.4-lx.30-rc.1`. База та же — sing-box `v1.14.4`, `upstream/stable` `c005f3530`, дрейф 0, сабмодули, `go.mod` и Go 1.26.10 не менялись. Одна тема: второй запрос LxBox по Taildrop (SPEC 149 §4). rc нужен LxBox и лаунчеру для пина под новый ключ и поле.
+
+- 🆕 **Tailscale: выключатель Taildrop узла и отправитель полученного файла ([SPEC 149 §4](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/149-TAILSCALE_LOGIN_TOGGLE/SPEC.md)).** Узел принимал файлы от своих устройств всегда, если file sharing включён в админке; клиент мог только удалить файл после приёма.
+  - Ключ endpoint'а `disable_taildrop` (bool, по умолчанию — как апстрим). При `true` peer API `/v0/put/` (PUT и GET докачки) отвечает 403 `Taildrop is disabled on this node` до апстримных проверок прав; `SendTaildropFiles` — `FailedPrecondition`; `canShareFiles = false`, у пиров `canReceiveFiles = false`. Файлы на диске остаются во входящих. Меняется reload'ом. Другие устройства по-прежнему видят узел получателем — это решает control, отказ они получают ответом 403.
+  - `TaildropFile.senderID` (proto 5, блок `lx_command`; libbox `TaildropFile.SenderID`) — stable node ID отправителя рядом с `senderName`; в памяти, после перезапуска ядра пустой у файлов с диска.
+  - В апстримных `taildrop.go`, `taildrop_send.go`, `endpoint.go`, `option/tailscale.go`, `adapter/tailscale.go`, `started_service_taildrop.go`, libbox `command_types_taildrop.go` — блоки и строки `// lx: SPEC 149`. Юниты в `protocol/tailscale` (под `-race`) и `daemon`; на живом tailnet не прогонялось, проверка — за LxBox.
+- 🧰 В `rc.1` вошла и [SPEC 150](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/150-QUIC_DETOUR_OVERSIZE_DATAGRAM/SPEC.md) (`6d80663b9`): QUIC-клиент (`masque` h3, `hysteria2`, `tuic`) с UDP через потоковый `detour` больше не умирает на датаграмме длиннее буфера. Раздел `rc.1` её не называл.
+
+#### v1.14.4-lx.30-rc.1
+
+Пререлиз после `v1.14.4-lx.29`. База — sing-box `v1.14.4`, `upstream/stable` `c005f3530`, дрейф 0, сабмодули и Go 1.26.10 не менялись. Темы: вход по новому ключу и выключатель Tailscale-endpoint'а без перезапуска (SPEC 149, запрос LxBox), бамп `x/net`/`x/crypto`/`grpc` по govulncheck и строка режима oom-killer при старте (SPEC 148 §5). rc нужен LxBox для пина под SPEC 149 и служит полной релизной сборкой после смены зависимостей.
+
+- 🆕 **Tailscale: вход с новым ключом и выключение endpoint'а без перезапуска box ([SPEC 149](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/149-TAILSCALE_LOGIN_TOGGLE/SPEC.md)).** Узел, которому control отказал (`invalid key: API key does not exist`), раньше брал новый ключ только правкой конфига и полным рестартом сервиса.
+  - RPC `TailscaleLogin(endpointTag, authKey)` (блок `lx_command`) повторяет на работающем backend'е старт tsnet: `Start` с ключом и prefs старта, `editPrefs`, `StartLoginInteractive` в `NeedsLogin`; пустой ключ — интерактивный вход, AuthURL появляется в статусе endpoint'а. Вошедший узел (tsnet там ключ игнорирует) и выключенный — `FailedPrecondition`. Ключ не логируется.
+  - Выключатель — `adapter.EndpointToggle` за прежним `SetEndpointEnabled` (SPEC 106): `WantRunning=false/true`, идентичность и состояние узла сохраняются. Дайлы и listen через выключенный endpoint отказывают сразу, до резолва домена, а не по таймауту gVisor; апстримный `Logout` выключенного отказывает. Выключение не переживает рестарт: tsnet ставит `WantRunning=true` при каждом старте.
+  - `GetOutbounds.endpointState` для Tailscale: `up`/`disabled`/`down`. libbox — `CommandClient.TailscaleLogin`, javap-дельта — один метод `tailscaleLogin(String, String)`.
+  - Логика в `protocol/tailscale/toggle_lx.go`, в апстримном `endpoint.go` четыре блока `// lx:`. `protocol/tailscale` добавлен в lx-ci — раньше его тесты не бежали ни в одном шаге. Против живого control (tailnet/Headscale) не прогонялось, проверка — за LxBox.
+- 🔧 **Зависимости по govulncheck.** `golang.org/x/net` v0.57.0 → v0.62.0 (HTTP/2-сервер, квадратичный разбор HTML), `golang.org/x/crypto` v0.54.0 → v0.58.0 (SSH), `google.golang.org/grpc` v1.83.1 → v1.83.2; заодно `x/sys`, `x/text`, `x/term`, `x/sync`, `x/mod`, `x/tools`. govulncheck: 10 достижимых → 0. `x/net` ≥ v0.60 требует `go 1.26.0` в `go.mod` (апстрим — 1.25.5); сборки и раньше шли на `go.version`, Win7 тоже. Расхождение с апстримом — `// lx:` над директивой `go`, на синке брать пины апстрима, когда они не старше.
+- 🧰 **oom-killer пишет режим и пороги при старте слежения (SPEC 148 §5):** `mode: runtime_limit, limit: 200 MB, trigger: 195 MB, armed: 190 MB`, `, report only` при `killer_disabled` — по просьбе LxBox после проверки lx.29 на AVD.
+- 🧰 Мелочи: `lxd` снова собирается под freebsd (`Rlimit.Cur` там `int64`); нестабильный `TestLxNestedSelectorSwitchDuringDetourCloseNoDeadlock` ждёт асинхронного закрытия сокета узла вместо мгновенной проверки; комментарий `build_libbox` и ноты lx.38 — `ts_omit_taildrop` в AAR no-op, Taildrop в AAR есть.
+
 #### v1.14.4-lx.29
 
 Стабильный релиз после `v1.14.4-lx.28`, без rc-линии. База — sing-box `v1.14.4`, `upstream/stable` `c005f3530`, дрейф 0 (сабмодули, `go.mod` и Go 1.26.10 с lx.28 не менялись; dry run релизной сборки не требуется). Одна тема: лимит памяти oom-killer по памяти Go-рантайма вместо RSS процесса и память рантайма в `Status` (SPEC 148, issue #62). Пользовательские ноты — `docs-lx/releases/v1.14.4-lx.29.md`.

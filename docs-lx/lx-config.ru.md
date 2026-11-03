@@ -15,8 +15,8 @@
 | **XHTTP** транспорт (совместим с Xray) | `with_xhttp` | `transport.type: "xhttp"` на VLESS / VMess / Trojan outbound | desktop + mobile |
 | **AmneziaWG 2.0/3.x** (AWG2, AWG3) | `with_awg` | доп. поля на `wireguard` **endpoint** | desktop + mobile |
 | **MASQUE** outbound (CONNECT-IP / WARP) | `with_quic`+`with_gvisor` | `outbounds[].type: "masque"` | desktop + mobile |
-| **Idle-suspend** (SPEC 020) | `with_lx_idle_suspend` | `lx.wg.idle_suspend` (+ `idle_suspend_reachable`, `idle_teardown`); старые `route.lx_idle_*` — устаревшие алиасы | **только mobile** (AAR) |
-| **Корневой блок `lx`** (SPEC 098) | — (разбирается всегда) | `lx.wg`, `lx.masque`, `lx.mtu_align` — глобальные ручки форка, [§13](#13-корневой-блок-lx-spec-098) | desktop + mobile |
+| **Idle-suspend** (SPEC 020) | `with_lx_idle_suspend` | `lx.wg.idle_suspend` (+ `idle_suspend_reachable`, `idle_teardown`) | **только mobile** (AAR) |
+| **Корневой блок `lx`** (SPEC 098) | — (разбирается всегда) | `lx.wg`, `lx.masque`, `lx.mtu_align`, `lx.quic_sniff_decoy` — глобальные ручки форка, [§13](#13-корневой-блок-lx-spec-098) | desktop + mobile |
 | **Группа DNS-серверов** (SPEC 033/035/143) | — (всегда в сборке) | `dns.servers[].type: "group"` | desktop + mobile |
 | **VLESS `encryption`** (SPEC 032) | — (всегда в сборке) | `encryption` на `vless`-outbound | desktop + mobile |
 | **Демон `lxd`** (SPEC 055–057, 063–068) | `with_lxd` | не ключ конфига — подкоманда `sing-box lxd` + `<state-dir>/daemon.json`; см. [lxd-daemon.ru.md](lxd-daemon.ru.md) | desktop / сервер (**не** Win7, **не** AAR) |
@@ -35,8 +35,8 @@ GC-нагрева / RAM, ~8 МБ каждый там, где `BatchSize=128` —
 старте** с ошибкой `lx.wg.* is set but this build lacks idle-suspend support; rebuild with
 -tags with_lx_idle_suspend (mobile-only feature)`. См. [фичу ENERGY](../SPECS/FEATURES/008-ENERGY/FEATURE.md).
 
-Смежные ключи (ревизия 2026-07-15; SPEC 098 перенесла их в блок `lx`, старые имена
-`route.lx_idle_*` — устаревшие алиасы на один релиз): `lx.wg.idle_suspend_reachable` — опциональное
+Смежные ключи (ревизия 2026-07-15; с SPEC 098 в блоке `lx` — старые имена `route.lx_idle_*`
+удалены, конфиг с ними не загружается как с неизвестными ключами): `lx.wg.idle_suspend_reachable` — опциональное
 второе, более длинное окно простоя, после которого гасятся и *достижимые* эндпоинты
 (члены пула, выбранный узел, final); `lx.wg.idle_teardown` — третий уровень:
 сколько эндпоинт может *спать* до полного сноса (Close, освобождается и gVisor
@@ -76,6 +76,7 @@ netstack; пробуждение = rebuild ~0.5–1 с; дефолт = reachable
 - [11. Снифферы протоколов для трафика из LAN (SPEC 078 / 080)](#11-снифферы-протоколов-для-трафика-из-lan-spec-078--080)
 - [12. Проверка и сборка](#12-проверка-и-сборка)
 - [13. Корневой блок `lx` (SPEC 098)](#13-корневой-блок-lx-spec-098)
+- [14. Tailscale: выключить Taildrop (SPEC 149)](#14-tailscale-выключить-taildrop-spec-149)
 
 ---
 
@@ -109,7 +110,8 @@ masquerade-сахар `id`/`ip`/`ib`, VLESS `encryption` и `round_robin`-бал
     "masque": {
       "idle_timeout": "5m"                      // дефолт: выкл. Глобальное окно простоя masque-узлов без своего ключа
     },
-    "mtu_align": "clamp"                        // дефолт: clamp. off | fill | clamp, либо объект {"mode", "except": [теги]} (§13)
+    "mtu_align": "clamp",                       // дефолт: clamp. off | fill | clamp, либо объект {"mode", "except": [теги]} (§13)
+    "quic_sniff_decoy": "off"                   // дефолт: off. off | direct | detour | all (или bool). Один байт перед QUIC Initial против сниффинга SNI на релее (§13, SPEC 151)
   },
 
   "outbounds": [
@@ -281,7 +283,7 @@ masquerade-сахар `id`/`ip`/`ib`, VLESS `encryption` и `round_robin`-бал
 ```
 
 > **Счёт полей:** 26 XHTTP + 30 AmneziaWG (вкл. `id`/`ip`/`ib` и 9 ключей AWG 3.x) + 1 VLESS (`encryption`) +
-> 5 `urltest` (`mode` + `balancer{pool,pool_tolerance,sticky_hash}`) + 8 `lx` (6 `lx.wg` + `lx.masque.idle_timeout` + `lx.mtu_align`). Взаимоисключающие / игнорируемые поля помечены
+> 5 `urltest` (`mode` + `balancer{pool,pool_tolerance,sticky_hash}`) + 9 `lx` (6 `lx.wg` + `lx.masque.idle_timeout` + `lx.mtu_align` + `lx.quic_sniff_decoy`). Взаимоисключающие / игнорируемые поля помечены
 > в комментариях выше; разделы ниже дают семантику каждого поля, подводные камни и статус
 > живой проверки.
 
@@ -1123,7 +1125,8 @@ CI (`.github/workflows/lx-ci.yml`) собирает матрицу фич (`base
   "masque": {
     "idle_timeout": "5m"
   },
-  "mtu_align": "clamp"
+  "mtu_align": "clamp",
+  "quic_sniff_decoy": "detour"
 }
 ```
 
@@ -1272,25 +1275,56 @@ mtu_align: wg-exit mtu 1420 → 1200 clamped (limited by warp[masque] mtu 1280 v
 управляется сервером. Чем masque отвечает на это снизу (внешний `InitialPacketSize` = `mtu + 51`,
 ICMP Packet Too Big с фактическим бюджетом) — в [§4](#4-masque-outbound--cloudflare-warp-spec-021).
 
-### Устаревшие `route.lx_idle_*`
+### `lx.quic_sniff_decoy` — QUIC через релей, который сниффит SNI
 
-| Старый ключ | Новый ключ |
+| Значение | Дозвоны masque h3, hysteria2 и tuic, которые шлют один байт (`0x00`) перед первым QUIC Initial |
+|---|---|
+| `"off"` / `false` / нет ключа (**дефолт**) | никакие |
+| `"direct"` | дозвоны через собственный сокет устройства: без `detour` или `detour` на outbound `direct` |
+| `"detour"` | дозвоны, которые несёт другой outbound — прокси или туннель |
+| `"all"` / `true` | все |
+
+```jsonc
+"lx": { "quic_sniff_decoy": "detour" }
+```
+
+Релей с Xray `sniffing` (`destOverride` с `quic`, без `routeOnly`) расшифровывает QUIC Initial,
+берёт SNI и отправляет поток на это имя вместо набранного адреса: masque падает с `different
+public key than pinned`, hysteria2/tuic с подставным SNI попадают на чужой хост или в пустоту.
+Xray решает по первой датаграмме потока; первый байт, который не long-header пакет QUIC, выводит
+его QUIC-сниффер из игры, назначение остаётся набранным. Сервер отбрасывает байт не разбирая
+(снят fixed bit QUIC). Без задержки и лишнего хендшейка. Включать, когда QUIC-узел работает
+напрямую и ломается через чужой релей (h2 masque через тот же релей обычно работает — SPEC 060).
+Режимы уводят обманку с пути, где на неё может среагировать DPI вашего аплинка: `"detour"` шлёт
+её только через релеи, `"direct"` — только по собственному сокету устройства (сниффер может стоять
+и там, выше по сети, например роутер с выходом через Xray). sing-box-релеи (1.13+) назначение по сниффу не переписывают, им ничего не нужно. Не покрыто: port hopping у
+hysteria2 (`server_ports`). Подробности — [SPEC 151](../SPECS/TASKS/151-QUIC_SNIFF_DECOY/SPEC.ru.md).
+
+### Удалённые `route.lx_idle_*`
+
+| Старый ключ (удалён) | Ключ |
 |---|---|
 | `route.lx_idle_suspend` | `lx.wg.idle_suspend` |
 | `route.lx_idle_suspend_reachable` | `lx.wg.idle_suspend_reachable` |
 | `route.lx_idle_teardown` | `lx.wg.idle_teardown` |
 
-Старые ключи принимаются один релиз, с предупреждением на каждый ключ в логе старта
-(`route.lx_idle_suspend is deprecated, use lx.wg.idle_suspend`). Ключ, заданный в обоих местах с
-одинаковым значением, даёт то же предупреждение; с разными — ядро не стартует:
-`route.lx_idle_suspend conflicts with lx.wg.idle_suspend`. Алиасы снимаются в релизе после
-перехода LxBox и лаунчера на `lx`. Предупреждения пишутся в лог работающего ядра;
-`sing-box check` их не печатает.
+Устаревшие алиасы удалены (владелец 2026-11-02): конфиг, в котором они остались, не загружается с
+ошибкой неизвестного поля, как при любой опечатке в ключе. Значения переносятся в `lx.wg`.
 
-Running-config (`GetRunningConfig`, SPEC 037) отдаёт блок в канонической форме: конфиг, пришедший
-с `route.lx_idle_*`, показывается как `lx.wg.*`, старых ключей в нём нет.
+Running-config (`GetRunningConfig`, SPEC 037) отдаёт блок `lx` в канонической форме (пустые
+подблоки отброшены).
 
 ### Зарезервировано: `lx.naive`
 
 `single_engine` и `lazy_start` зарезервированы за SPEC 096. До неё подблок `lx.naive` отвергается
 как любой неизвестный ключ.
+
+## 14. Tailscale: выключить Taildrop (SPEC 149)
+
+Ключ `disable_taildrop` на endpoint'е `tailscale`. Без ключа Taildrop работает как в апстриме.
+
+```json
+{ "type": "tailscale", "tag": "ts", "disable_taildrop": true }
+```
+
+С `true` узел не принимает файлы: отправитель получает ошибку 403 `Taildrop is disabled on this node`. Отправка с узла тоже отвергается, в статусе `canShareFiles = false`. Файлы, полученные раньше, остаются в `taildrop_directory`, их можно открыть и удалить. Другие устройства tailnet по-прежнему видят узел получателем, это задаёт админка Tailscale, а не узел.

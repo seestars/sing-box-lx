@@ -128,6 +128,15 @@ type Endpoint struct {
 	keyAuth             bool
 	started             atomic.Bool
 	systemDialer        *dialer.DefaultDialer
+	// lx:begin tailscale-toggle
+	// SPEC 149: on/off switch and login; logic in toggle_lx.go.
+	disabled     atomic.Bool
+	toggleAccess sync.Mutex
+	// lx:end tailscale-toggle
+	// lx:begin tailscale-taildrop
+	// SPEC 149: disable_taildrop; checks in taildrop.go and taildrop_send.go.
+	taildropDisabled bool
+	// lx:end tailscale-taildrop
 }
 
 func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.TailscaleEndpointOptions) (adapter.Endpoint, error) {
@@ -246,6 +255,7 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 		systemInterfaceName:        options.SystemInterfaceName,
 		systemInterfaceMTU:         options.SystemInterfaceMTU,
 		keyAuth:                    options.AuthKey != "",
+		taildropDisabled:           options.DisableTaildrop, // lx: SPEC 149
 	}, nil
 }
 
@@ -729,6 +739,12 @@ func (t *Endpoint) Logout(ctx context.Context) error {
 	if !t.started.Load() {
 		return E.New("Tailscale is not ready yet")
 	}
+	// lx:begin tailscale-toggle
+	// SPEC 149: the restart below sets WantRunning=true and would bypass the switch.
+	if err := t.checkEnabled(); err != nil {
+		return err
+	}
+	// lx:end tailscale-toggle
 	err := common.Must1(t.server.LocalClient()).Logout(ctx)
 	if err != nil {
 		return E.Cause(err, "tailscale logout")
@@ -781,6 +797,11 @@ func (t *Endpoint) DialContext(ctx context.Context, network string, destination 
 	if !t.started.Load() {
 		return nil, E.New("Tailscale is not ready yet")
 	}
+	// lx:begin tailscale-toggle
+	if err := t.checkEnabled(); err != nil {
+		return nil, err
+	}
+	// lx:end tailscale-toggle
 	if destination.IsDomain() {
 		destinationAddresses, err := t.dnsRouter.Lookup(ctx, destination.Fqdn, adapter.DNSQueryOptions{})
 		if err != nil {
@@ -875,6 +896,11 @@ func (t *Endpoint) listenPacketWithAddress(ctx context.Context, destination M.So
 
 func (t *Endpoint) ListenPacketWithDestination(ctx context.Context, destination M.Socksaddr) (net.PacketConn, netip.Addr, error) {
 	t.logger.InfoContext(ctx, "outbound packet connection to ", destination)
+	// lx:begin tailscale-toggle
+	if err := t.checkEnabled(); err != nil {
+		return nil, netip.Addr{}, err
+	}
+	// lx:end tailscale-toggle
 	if destination.IsDomain() {
 		destinationAddresses, err := t.dnsRouter.Lookup(ctx, destination.Fqdn, adapter.DNSQueryOptions{})
 		if err != nil {

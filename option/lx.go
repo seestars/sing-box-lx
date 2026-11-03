@@ -25,11 +25,17 @@ type LXOptions struct {
 	// (lx: SPEC 120): a mode string, or an object with the mode and the tags
 	// to leave alone. Absent = "clamp".
 	MTUAlign *LXMTUAlign `json:"mtu_align,omitempty"`
+	// QUICSniffDecoy sends one non-QUIC byte ahead of the first Initial of
+	// masque h3, hysteria2 and tuic dials, so a relay that rewrites the
+	// destination by the sniffed SNI leaves it as dialled (lx: SPEC 151):
+	// "off", "direct", "detour" or "all", or a boolean for "all"/"off".
+	// Absent = off.
+	QUICSniffDecoy LXQUICSniffDecoy `json:"quic_sniff_decoy,omitempty"`
 }
 
-// LXWGOptions holds the WG/AWG endpoint knobs. The three idle keys keep the
-// SPEC 020 semantics they had as route.lx_idle_*; they act only in builds with
-// with_lx_idle_suspend, and the router refuses them at start otherwise.
+// LXWGOptions holds the WG/AWG endpoint knobs. The three idle keys carry the
+// SPEC 020 semantics; they act only in builds with with_lx_idle_suspend, and
+// the router refuses them at start otherwise.
 type LXWGOptions struct {
 	// IdleSuspend is the idle threshold after which an endpoint outside the
 	// active routing tree is brought Down. 0 / absent disables the idle tick.
@@ -125,6 +131,49 @@ func validateLXMTUAlignMode(mode string) error {
 	return E.New(`lx.mtu_align.mode must be "off", "fill" or "clamp"`)
 }
 
+// The lx.quic_sniff_decoy modes (lx: SPEC 151): which QUIC dials carry the
+// decoy, by what lies under the QUIC stack — "direct" a kernel socket,
+// "detour" a conn carried by another outbound.
+const (
+	LXQUICSniffDecoyOff    = "off"
+	LXQUICSniffDecoyDirect = "direct"
+	LXQUICSniffDecoyDetour = "detour"
+	LXQUICSniffDecoyAll    = "all"
+)
+
+// LXQUICSniffDecoy is lx.quic_sniff_decoy: a mode string, or a boolean that
+// reads as "all" (true) or "off" (false). The mode string is the canonical
+// output.
+type LXQUICSniffDecoy string
+
+func (o *LXQUICSniffDecoy) UnmarshalJSON(bytes []byte) error {
+	var enabled bool
+	if err := json.Unmarshal(bytes, &enabled); err == nil {
+		if enabled {
+			*o = LXQUICSniffDecoyAll
+		} else {
+			*o = LXQUICSniffDecoyOff
+		}
+		return nil
+	}
+	var mode string
+	if err := json.Unmarshal(bytes, &mode); err != nil {
+		return E.New(`lx.quic_sniff_decoy must be "off", "direct", "detour", "all" or a boolean`)
+	}
+	switch mode {
+	case LXQUICSniffDecoyOff, LXQUICSniffDecoyDirect, LXQUICSniffDecoyDetour, LXQUICSniffDecoyAll:
+		*o = LXQUICSniffDecoy(mode)
+		return nil
+	}
+	return E.New(`lx.quic_sniff_decoy must be "off", "direct", "detour", "all" or a boolean`)
+}
+
+func (o LXQUICSniffDecoy) DescribeSchema(builder schema.Builder) (*schema.Node, error) {
+	return builder.Define("LXQUICSniffDecoy", func() (*schema.Node, error) {
+		return schema.AnyOf(schema.StringEnum(LXQUICSniffDecoyOff, LXQUICSniffDecoyDirect, LXQUICSniffDecoyDetour, LXQUICSniffDecoyAll), schema.BooleanNode()), nil
+	})
+}
+
 // LXBuildOverflow is the resolved lx.wg.build_overflow.
 type LXBuildOverflow uint8
 
@@ -145,6 +194,9 @@ type LXResolved struct {
 	TrustTunnel LXTrustTunnelResolved
 	// MTUAlign always carries a mode: "clamp" when the key is absent.
 	MTUAlign LXMTUAlignResolved
+	// QUICSniffDecoy is the lx.quic_sniff_decoy mode (lx: SPEC 151); "" or
+	// "off" when the key is absent.
+	QUICSniffDecoy string
 }
 
 type LXWGResolved struct {
@@ -199,6 +251,15 @@ func (r *LXResolved) TrustTunnelOrZero() LXTrustTunnelResolved {
 	return r.TrustTunnel
 }
 
+// QUICSniffDecoyOrOff returns the lx.quic_sniff_decoy mode, or "off" when r
+// is nil or the key is absent.
+func (r *LXResolved) QUICSniffDecoyOrOff() string {
+	if r == nil || r.QUICSniffDecoy == "" {
+		return LXQUICSniffDecoyOff
+	}
+	return r.QUICSniffDecoy
+}
+
 // MTUAlignOrDefault returns the mtu_align policy, or the default (clamp,
 // no exceptions) when r is nil.
 func (r *LXResolved) MTUAlignOrDefault() LXMTUAlignResolved {
@@ -208,16 +269,14 @@ func (r *LXResolved) MTUAlignOrDefault() LXMTUAlignResolved {
 	return r.MTUAlign
 }
 
-// ResolveLX folds the deprecated route.lx_idle_* aliases into the `lx` block,
-// validates it and returns the resolved values plus one warning per alias used.
+// ResolveLX validates the root `lx` block and returns the resolved values.
 //
-// On success options is left in canonical form: options.LX carries every value
-// (nil when nothing is set) and the route.lx_idle_* fields are cleared. Both
-// options.LX and options.Route are replaced by fresh copies, never written
-// through, so a shallow copy of the caller's Options can be resolved without
-// touching the original. On error options is not modified. Resolving a
-// canonical Options again is a no-op without warnings.
-func ResolveLX(options *Options) (*LXResolved, []string, error) {
+// On success options is left in canonical form: empty sub-blocks are dropped
+// and options.LX is nil when nothing is set. options.LX is replaced by a fresh
+// copy, never written through, so a shallow copy of the caller's Options can
+// be resolved without touching the original. On error options is not
+// modified. Resolving a canonical Options again is a no-op.
+func ResolveLX(options *Options) (*LXResolved, error) {
 	var lx LXOptions
 	if options.LX != nil {
 		lx = *options.LX
@@ -226,54 +285,15 @@ func ResolveLX(options *Options) (*LXResolved, []string, error) {
 	if lx.WG != nil {
 		wg = *lx.WG
 	}
-	var route RouteOptions
-	if options.Route != nil {
-		route = *options.Route
-	}
-
-	var warnings []string
-	aliasUsed := false
-	alias := func(key string, legacySet, currentSet, equal bool) error {
-		if !legacySet {
-			return nil
-		}
-		if currentSet && !equal {
-			return E.New("route.lx_", key, " conflicts with lx.wg.", key)
-		}
-		warnings = append(warnings, "route.lx_"+key+" is deprecated, use lx.wg."+key)
-		aliasUsed = true
-		return nil
-	}
-	err := alias("idle_suspend", route.LXIdleSuspend != 0, wg.IdleSuspend != 0,
-		route.LXIdleSuspend == wg.IdleSuspend)
-	if err != nil {
-		return nil, nil, err
-	}
-	if route.LXIdleSuspend != 0 {
-		wg.IdleSuspend = route.LXIdleSuspend
-	}
-	err = alias("idle_suspend_reachable", route.LXIdleSuspendReachable != 0, wg.IdleSuspendReachable != 0,
-		route.LXIdleSuspendReachable == wg.IdleSuspendReachable)
-	if err != nil {
-		return nil, nil, err
-	}
-	if route.LXIdleSuspendReachable != 0 {
-		wg.IdleSuspendReachable = route.LXIdleSuspendReachable
-	}
-	err = alias("idle_teardown", route.LXIdleTeardown != nil, wg.IdleTeardown != nil,
-		route.LXIdleTeardown != nil && wg.IdleTeardown != nil && *route.LXIdleTeardown == *wg.IdleTeardown)
-	if err != nil {
-		return nil, nil, err
-	}
-	if route.LXIdleTeardown != nil {
-		value := *route.LXIdleTeardown
-		wg.IdleTeardown = &value
-	}
 
 	resolved, err := resolveLXValues(wg, lx.MASQUE, lx.TrustTunnel, lx.MTUAlign)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
+	if lx.QUICSniffDecoy == LXQUICSniffDecoyOff {
+		lx.QUICSniffDecoy = ""
+	}
+	resolved.QUICSniffDecoy = string(lx.QUICSniffDecoy)
 
 	if wg != (LXWGOptions{}) {
 		lx.WG = &wg
@@ -289,18 +309,12 @@ func ResolveLX(options *Options) (*LXResolved, []string, error) {
 	if lx.MTUAlign != nil && lx.MTUAlign.Mode == "" && len(lx.MTUAlign.Except) == 0 {
 		lx.MTUAlign = nil
 	}
-	if lx.WG == nil && lx.MASQUE == nil && lx.TrustTunnel == nil && lx.MTUAlign == nil {
+	if lx.WG == nil && lx.MASQUE == nil && lx.TrustTunnel == nil && lx.MTUAlign == nil && lx.QUICSniffDecoy == "" {
 		options.LX = nil
 	} else {
 		options.LX = &lx
 	}
-	if aliasUsed {
-		route.LXIdleSuspend = 0
-		route.LXIdleSuspendReachable = 0
-		route.LXIdleTeardown = nil
-		options.Route = &route
-	}
-	return resolved, warnings, nil
+	return resolved, nil
 }
 
 func resolveLXValues(wg LXWGOptions, masque *LXMASQUEOptions, trustTunnel *LXTrustTunnelOptions, mtuAlign *LXMTUAlign) (*LXResolved, error) {

@@ -25,6 +25,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
 	"github.com/sagernet/sing-box/common/dialer"
+	"github.com/sagernet/sing-box/common/lxdatagram"
 	"github.com/sagernet/sing-box/common/tls"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
@@ -87,6 +88,7 @@ type Outbound struct {
 	dnsRouter   adapter.DNSRouter
 	profile     masque.Profile
 	idleTimeout time.Duration
+	sniffDecoy  string // lx: SPEC 151 — lx.quic_sniff_decoy mode
 
 	server    M.Socksaddr
 	uri       string
@@ -395,6 +397,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		dnsRouter:    service.FromContext[adapter.DNSRouter](ctx),
 		profile:      profile,
 		idleTimeout:  idleTimeout,
+		sniffDecoy:   lxdatagram.SniffDecoyFromContext(ctx),
 		server:       options.ServerOptions.Build(),
 		uri:          uri,
 		network:      network,
@@ -884,9 +887,14 @@ func (o *Outbound) connectH3WithBudget(ctx context.Context, handshakeBudget time
 	// Transport.Close never returned, DialEarly never came back, and the dial
 	// held runMu for good (field dump 2026-11-01). Conns that say so get a real
 	// read deadline here, the way the stream transports do for themselves.
-	var rawConn net.Conn = udpConn
-	if deadline.NeedAdditionalReadDeadline(udpConn) {
-		rawConn = deadline.NewConn(udpConn)
+	// lx: SPEC 150 — a stream-carried conn gets kernel read semantics: an
+	// oversize datagram (Cloudflare's PMTUD probes run 1453–1462 bytes over the
+	// 1452 quic-go reads into) is truncated and dropped instead of surfacing as
+	// io.ErrShortBuffer, which quic-go treats as fatal. Closest to the detour
+	// conn, below the SPEC 146 wrapper; a kernel socket passes through untouched.
+	rawConn := lxdatagram.TruncateReads(udpConn, o.logger)
+	if deadline.NeedAdditionalReadDeadline(rawConn) {
+		rawConn = deadline.NewConn(rawConn)
 	}
 	// UDP socket is up; the QUIC handshake is the next (and most commonly stuck)
 	// step — a hang here means our ClientHello left but no ServerHello came back
@@ -897,6 +905,11 @@ func (o *Outbound) connectH3WithBudget(ctx context.Context, handshakeBudget time
 		var cancel context.CancelFunc
 		handshakeCtx, cancel = context.WithTimeout(ctx, handshakeBudget)
 		defer cancel()
+	}
+	// lx: SPEC 151 — a datagram no relay sniffer recognises goes first, so a
+	// sniffing relay leaves the destination as dialled.
+	if lxdatagram.SniffDecoyApplies(o.sniffDecoy, udpConn) {
+		lxdatagram.WriteSniffDecoy(rawConn, o.logger)
 	}
 	quicStage := o.beginQUICLx(ctx) // lx: SPEC 139 — `quic` stage
 	quicConn, err := quic.DialEarly(handshakeCtx, bufio.NewUnbindPacketConn(rawConn), udpConn.RemoteAddr(), o.tlsConfig, o.quicConfig)

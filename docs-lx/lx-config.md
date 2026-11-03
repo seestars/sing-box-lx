@@ -15,8 +15,8 @@
 | **XHTTP** transport (Xray-compatible) | `with_xhttp` | `transport.type: "xhttp"` on a VLESS / VMess / Trojan outbound | desktop + mobile |
 | **AmneziaWG 2.0/3.x** (AWG2, AWG3) | `with_awg` | extra fields on a `wireguard` **endpoint** | desktop + mobile |
 | **MASQUE** outbound (CONNECT-IP / WARP) | `with_quic`+`with_gvisor` | `outbounds[].type: "masque"` | desktop + mobile |
-| **Idle-suspend** (SPEC 020) | `with_lx_idle_suspend` | `lx.wg.idle_suspend` (+ `idle_suspend_reachable`, `idle_teardown`); the old `route.lx_idle_*` are deprecated aliases | **mobile only** (AAR) |
-| **Root `lx` block** (SPEC 098) | — (always parsed) | `lx.wg`, `lx.masque`, `lx.mtu_align` — the fork's global knobs, [§13](#13-the-lx-root-block-spec-098) | desktop + mobile |
+| **Idle-suspend** (SPEC 020) | `with_lx_idle_suspend` | `lx.wg.idle_suspend` (+ `idle_suspend_reachable`, `idle_teardown`) | **mobile only** (AAR) |
+| **Root `lx` block** (SPEC 098) | — (always parsed) | `lx.wg`, `lx.masque`, `lx.mtu_align`, `lx.quic_sniff_decoy` — the fork's global knobs, [§13](#13-the-lx-root-block-spec-098) | desktop + mobile |
 | **DNS server group** (SPEC 033/035/143) | — (always built) | `dns.servers[].type: "group"` | desktop + mobile |
 | **VLESS `encryption`** (SPEC 032) | — (always built) | `encryption` on a `vless` outbound | desktop + mobile |
 | **`lxd` daemon** (SPEC 055–057, 063–068) | `with_lxd` | not a config key — the `sing-box lxd` subcommand + `<state-dir>/daemon.json`; see [lxd-daemon.md](lxd-daemon.md) | desktop / server (**not** Win7, **not** AAR) |
@@ -36,8 +36,8 @@ mismatch, a desktop/CLI binary that is handed a config with `lx.wg.idle_suspend`
 idle-suspend support; rebuild with -tags with_lx_idle_suspend (mobile-only feature)`.
 See the [ENERGY feature](../SPECS/FEATURES/008-ENERGY/FEATURE.md).
 
-Related keys (2026-07-15 revision; moved to the `lx` block by SPEC 098, the old
-`route.lx_idle_*` names are deprecated aliases for one release): `lx.wg.idle_suspend_reachable` — optional
+Related keys (2026-07-15 revision; in the `lx` block since SPEC 098 — the old `route.lx_idle_*`
+names are removed and fail to load as unknown keys): `lx.wg.idle_suspend_reachable` — optional
 second, longer idle window after which even *reachable* endpoints (pool members,
 the selected node, final) suspend; `lx.wg.idle_teardown` — the third level:
 how long an endpoint may *sleep* before a full teardown (Close, the gVisor
@@ -78,6 +78,7 @@ timelines and the recommended mobile configuration live in
 - [11. Protocol sniffers for LAN traffic (SPEC 078 / 080)](#11-protocol-sniffers-for-lan-traffic-spec-078--080)
 - [12. Validate & build](#12-validate--build)
 - [13. The `lx` root block (SPEC 098)](#13-the-lx-root-block-spec-098)
+- [14. Tailscale: turning Taildrop off (SPEC 149)](#14-tailscale-turning-taildrop-off-spec-149)
 
 ---
 
@@ -111,7 +112,8 @@ you need and read its section below. Each comment shows the **default** and the 
     "masque": {
       "idle_timeout": "5m"                      // default: off. Global idle window for masque nodes without their own key
     },
-    "mtu_align": "clamp"                        // default: clamp. off | fill | clamp, or an object {"mode", "except": [tags]} (§13)
+    "mtu_align": "clamp",                       // default: clamp. off | fill | clamp, or an object {"mode", "except": [tags]} (§13)
+    "quic_sniff_decoy": "off"                   // default: off. off | direct | detour | all (or a boolean). One byte ahead of the QUIC Initial against relay SNI sniffing (§13, SPEC 151)
   },
 
   "outbounds": [
@@ -283,7 +285,7 @@ you need and read its section below. Each comment shows the **default** and the 
 ```
 
 > **Field count:** 26 XHTTP + 30 AmneziaWG (incl. `id`/`ip`/`ib` and the 9 AWG 3.x keys) + 1 VLESS (`encryption`) +
-> 5 `urltest` (`mode` + `balancer{pool,pool_tolerance,sticky_hash}`) + 8 `lx` (6 `lx.wg` + `lx.masque.idle_timeout` + `lx.mtu_align`). Mutually-exclusive / ignored fields are
+> 5 `urltest` (`mode` + `balancer{pool,pool_tolerance,sticky_hash}`) + 9 `lx` (6 `lx.wg` + `lx.masque.idle_timeout` + `lx.mtu_align` + `lx.quic_sniff_decoy`). Mutually-exclusive / ignored fields are
 > labelled inline above; the sections below give the per-field semantics, gotchas and live
 > verification status.
 
@@ -1125,7 +1127,8 @@ is the same as none. A misspelt key is a load error, not a silent default.
   "masque": {
     "idle_timeout": "5m"
   },
-  "mtu_align": "clamp"
+  "mtu_align": "clamp",
+  "quic_sniff_decoy": "detour"
 }
 ```
 
@@ -1275,25 +1278,56 @@ exposed over the lx RPC.
 server. What masque does from below (outer `InitialPacketSize` = `mtu + 51`, ICMP Packet Too Big
 with the real budget) is in [§4](#4-masque-outbound--cloudflare-warp-spec-021).
 
-### Deprecated `route.lx_idle_*`
+### `lx.quic_sniff_decoy` — QUIC through a relay that sniffs the SNI
 
-| Old key | New key |
+| Value | masque h3, hysteria2 and tuic dials that send one byte (`0x00`) before their first QUIC Initial |
+|---|---|
+| `"off"` / `false` / absent (**default**) | none |
+| `"direct"` | dials on the device's own socket: no `detour`, or `detour` to a `direct` outbound |
+| `"detour"` | dials carried by another outbound — a proxy or a tunnel |
+| `"all"` / `true` | every dial |
+
+```jsonc
+"lx": { "quic_sniff_decoy": "detour" }
+```
+
+A relay with Xray `sniffing` (`destOverride` with `quic`, no `routeOnly`) decrypts the QUIC
+Initial, takes the SNI and sends the flow to that name instead of the address you dialled: masque
+fails with `different public key than pinned`, hysteria2/tuic with a fake SNI reach someone else's
+host or nothing. Xray decides on the first datagram of a flow; a first byte that is not a QUIC
+long-header packet takes its QUIC sniffer out, and the destination stays as dialled. The server
+drops the byte unparsed (QUIC fixed bit clear). No delay, no extra handshake. Turn it on when a
+QUIC node works directly and breaks through a relay you do not control (h2 masque through the same
+relay usually works — SPEC 060). The modes keep the decoy off the path a DPI on your own uplink
+might react to: `"detour"` sends it only through relays, `"direct"` only on the device's own
+socket (a sniffer can sit upstream there too, e.g. a router egressing through Xray). sing-box
+relays (1.13+) do not rewrite the destination by sniffing and need nothing. Not covered: hysteria2 port hopping (`server_ports`). Details — [SPEC 151](../SPECS/TASKS/151-QUIC_SNIFF_DECOY/SPEC.md).
+
+### Removed `route.lx_idle_*`
+
+| Old key (removed) | Key |
 |---|---|
 | `route.lx_idle_suspend` | `lx.wg.idle_suspend` |
 | `route.lx_idle_suspend_reachable` | `lx.wg.idle_suspend_reachable` |
 | `route.lx_idle_teardown` | `lx.wg.idle_teardown` |
 
-The old keys are accepted for one release with a warning per key in the start log
-(`route.lx_idle_suspend is deprecated, use lx.wg.idle_suspend`). A key set in both places with
-the same value gets the same warning; with different values the core refuses to start:
-`route.lx_idle_suspend conflicts with lx.wg.idle_suspend`. The aliases go away in the release
-after LxBox and the launcher switch to `lx`. The warnings go to the log of a running core;
-`sing-box check` does not print them.
+The deprecated aliases are gone (owner 2026-11-02): a config that still carries one fails to load
+with an unknown-field error, like any misspelt key. Move the values to `lx.wg`.
 
-The running config (`GetRunningConfig`, SPEC 037) returns the block canonical: a config that came
-with `route.lx_idle_*` is shown as `lx.wg.*`, and the old keys are gone from it.
+The running config (`GetRunningConfig`, SPEC 037) returns the `lx` block canonical (empty
+sub-blocks dropped).
 
 ### Reserved: `lx.naive`
 
 `single_engine` and `lazy_start` are reserved for SPEC 096. Until that lands, an `lx.naive`
 sub-block is rejected like any unknown key.
+
+## 14. Tailscale: turning Taildrop off (SPEC 149)
+
+The `disable_taildrop` key on a `tailscale` endpoint. Without it Taildrop works as upstream.
+
+```json
+{ "type": "tailscale", "tag": "ts", "disable_taildrop": true }
+```
+
+With `true` the node accepts no files: the sender gets a 403 `Taildrop is disabled on this node`. Sending from the node is refused as well, and the status reports `canShareFiles = false`. Files received earlier stay in `taildrop_directory` and can still be opened and deleted. Other devices on the tailnet still see the node as a target; that is set by the Tailscale admin console, not by the node.
