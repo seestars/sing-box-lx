@@ -5,7 +5,7 @@
 | Поле | Значение |
 |------|----------|
 | Тип | R (refactor) — перевод MASQUE с собственной реализации на апстримную с тонким слоем под Cloudflare WARP |
-| Статус | **W (wait) — отложено до выхода sing-box 1.15 из альфы.** Раньше — только этап Э1 программы испытаний (§8): он дешёвый и решает, сколько швов нужно |
+| Статус | I (implemented) — 2026-11-05, ветка `lx-1.15`: швы в коде, юнит-тесты, живой WARP на NanoPi (h3 и h2 — `warp=on`); в `lx` не влито (линия 1.15 — только пререлизы). Не проверено вживую: фолбэк Ш4 на реальном молчащем эндпоинте, `on_demand` против таймера простоя, батарея, маппинг конфига в LxBox и лаунчере |
 | Условие возобновления | Апстрим выпустил 1.15.0 (или beta с замороженным API `transport/masque`, `transport/http`), либо владелец решил идти раньше |
 | Срез апстрима | `upstream/testing` = `e85872e91` (`v1.15.0-alpha.9` + 2, 2026-09-28). Ветка перезаливается force-push'ем: номера строк ниже верны для этого коммита |
 | Срез нашего кода | `lx` = `1f08c056c` (`v1.14.2-lx.8`) |
@@ -399,6 +399,7 @@ base64 -d <<< "$PUBLIC_KEY" | openssl dgst -sha256 -binary | base64
 | Имя эндпоинта в SNI режется DPI | SNI задаёт приложение; дефолта в ядре больше не будет |
 | URI запроса — `https://cloudflareaccess.com` без пути | У апстрима путь обязан начинаться с `/`. Какой `:path` уходит у нас при пустом пути и важен ли он WARP — не проверено |
 | С некоторых выходных адресов QUIC игнорируется без отказа | Шов Ш4 |
+| Туннеля на HTTP/1.1 нет: на `GET` с `Upgrade: cf-connect-ip` эндпоинт отвечает `404 Not Found` | Профиль `cloudflare` на h1 не спускается и `version: 1` не принимает — шов Ш8 |
 
 ### 7.2 Особенности апстримной реализации
 
@@ -573,3 +574,56 @@ curl -s -x socks5h://127.0.0.1:12345 https://www.cloudflare.com/cdn-cgi/trace
 - Открытые дефекты нашей реализации (107 §6, кроме исправленных в 108) не чиним: они уходят вместе
   с кодом.
 - CONNECT-UDP и HTTP-прокси апстрима в эту задачу не входят.
+
+## 12. Результаты первого прохода (2026-11-05, `lx-1.15`)
+
+Стенд: NanoPi (OpenWrt 25.12, arm64), ядро `lx-1.15`, новая WARP-регистрация (MASQUE), проверка
+`curl -x socks5h://… https://www.cloudflare.com/cdn-cgi/trace`.
+
+| Опыт | Конфиг | Результат | Вывод |
+|---|---|---|---|
+| Э1 | `masque-client` без `profile`, h3 | `403 Forbidden` на CONNECT | токен `connect-ip` WARP отвергает — Ш1 обязателен |
+| Э2 | `profile: cloudflare` + `address`, h3 | `warp=on`; 20 МБ за 2,0 с | h3 работает; `:path` `/`, отсутствие пустого User-Agent и `InitialPacketSize` 1331 WARP не мешают |
+| Э3 | то же, h2 | до шва Ш7: туннель открыт, пакеты не идут; после: `warp=on`, 20 МБ за 2,1 с | на h2 WARP кладёт в капсулу DATAGRAM голый IP-пакет без context ID |
+| Э4 | `profile: cloudflare` без `address`, h3 | «endpoint is not ready yet» | WARP не присылает `ADDRESS_ASSIGN` — Ш2 обязателен |
+| h1 | `profile: cloudflare` + `address`, `version: 1` (до шва Ш8) | `404 Not Found` на `GET` с `Upgrade: cf-connect-ip` | у WARP нет формы CONNECT-IP на HTTP/1.1; пробовалась одна форма запроса — та, что шлёт апстрим |
+| — | WG и AWG (jc/jmin/jmax) endpoint с `detour` на `masque-client` | `warp=on`, 20 МБ за 2,2 с, загрузка 5 МБ | вложенный туннель поверх нового транспорта и стека работает |
+
+Закрытые вопросы §10: 1 и 2 (WARP не шлёт `ADDRESS_ASSIGN`; на `ADDRESS_REQUEST` не отвечает — без
+`address` готовность не наступает), 3 (долгоживущий самоподписанный клиентский сертификат, 365 дней,
+принимается), 5 (код ответа 200), 6 (`:path` и User-Agent не важны), 8 (1331 проходит на стенде).
+Открыты: 4 (нужна ли настройка 0x276 — выставляется, отдельно не снималась), 7 (закрыт положительно:
+штатный клиент `x/net/http2` ведёт обычный CONNECT двунаправленно), 9, 10, 11.
+
+Что реализовано против плана §6:
+
+| Шов | Состояние | Где |
+|---|---|---|
+| Ш1 токен | сделан | `transport/masque/client_lx.go` `tunnelProtocol`, одна строка в `client.go` |
+| Ш2 статический адрес | сделан, ключ `address` | `client_lx.go` `requestOrApplyAddress`, `ignoreAddressAssign`; две строки в `client.go` |
+| Ш3 обычный CONNECT на h2 | сделан | `transport/http/tunnel_lx.go` `tunnelHeadersHTTP2`; одна строка в `tunnel_client.go` |
+| Ш4 фолбэк при молчании | сделан, бюджет 3 с; проверен юнит-тестом, вживую не воспроизводился | `tunnel_lx.go` `openTunnelHTTP3`; одна строка в `tunnel_client.go` |
+| Ш5 настройка 0x276 | сделан | одна строка в `client_h3.go` |
+| Ш6 ключи | сделан: `profile`, `address` | `option/masque_lx.go`, одна строка в `option/masque.go` |
+| **Ш7 сырые капсулы на потоке** (не было в плане) | сделан | `client_lx.go` `prependContextID`/`readContextID`; три строки в `session.go`, одна в `client.go` |
+| **Ш8 запрет HTTP/1.1** (не было в плане) | сделан | `tunnel_lx.go` `NoHTTP1`, `ErrTunnelHTTP1Refused`; блок в `openTunnelHTTP1AndClose` (`tunnel_client.go`); проверка `version: 1` в `warp_lx.go` |
+
+Правки в апстримных файлах: `transport/http/client.go` (3 строки), `client_h3.go` (1),
+`tunnel_client.go` (2 и блок Ш8), `transport/masque/client.go` (6), `session.go` (3), `option/masque.go` (1),
+`protocol/masque/client.go` (блок сборки опций). Профиль собирается в `protocol/masque/warp_lx.go`.
+
+**Особенность профиля `cloudflare`: HTTP/1.1 запрещён (Ш8).** У апстрима клиент спускается по
+версиям h3 → h2 → h1. На h1 он попадает тремя путями: задан `version: 1`; на TLS сервер согласовал
+ALPN `http/1.1` вместо `h2`; h2 отказал с причиной «сервер не поддерживает Extended CONNECT». Третий
+путь профилю закрыт швом Ш3: запрос на h2 идёт обычным CONNECT без `:protocol`, проверка
+`SETTINGS_ENABLE_CONNECT_PROTOCOL` в `x/net/http2` не срабатывает, любая другая ошибка h2
+возвращается как есть. Первые два оставались, и на них WARP отвечал `404` — в логе стоял статус h1,
+а причина (h3 молчит, h2 не согласован) терялась. Теперь `version: 1` с профилем — ошибка конфига
+«masque profile cloudflare has no HTTP/1.1 tunnel: use version 3 or 2», а спуск на h1 в работе
+заканчивается ошибкой `ErrTunnelHTTP1Refused` без запроса к серверу. Без профиля поведение
+апстрима не меняется. Тесты: `TestOpenTunnelNoHTTP1`, `TestApplyLXProfileCloudflareRejectsHTTP1`.
+
+Старый тип `masque` (outbound линии 1.14) на `lx-1.15` удалён; конфиг с ним получает ошибку
+«removed in 1.15; use the masque-client endpoint» (`include/masque_removed_lx.go`). Конфиг лаунчера
+владельца несёт два таких узла и WG-endpoint с `detour` на один из них — до смены маппинга в
+лаунчере и LxBox ядро 1.15 его не примет.
