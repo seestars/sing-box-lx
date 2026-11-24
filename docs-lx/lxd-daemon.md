@@ -159,7 +159,7 @@ Rules worth knowing:
 | `--invite-name <name>` | with `--service=install` — the name of the client the invite pairs (default `singbox-launcher` with `--invite-out`, no name without it) |
 | `client add [--name <label>] [--invite-out <file>]` | mint a one-time invite for a new client; `--invite-out` writes it into a new file instead of printing it |
 | `client list` / `client remove <name-or-fingerprint>` | list / revoke trusted clients |
-| `update [--dry-run] [--prerelease] [--no-restart] [--service <name>]` | self-update from the latest release for this binary's platform and a service restart through the init (linux, root; [8.6](#86-updating-sing-box-lxd-update)) |
+| `update [--dry-run] [--prerelease] [--no-restart] [--low-space] [--service <name>]` | self-update from the latest release for this binary's platform and a service restart through the init (linux, root; [8.6](#86-updating-sing-box-lxd-update)) |
 
 The subcommand exists only in builds with the `with_lxd` tag.
 
@@ -1022,7 +1022,8 @@ version, its release asset (`Platform:` in `sing-box version`, e.g.
    packed copy, `sing-box-<ver>-<platform>.upx.tar.gz`, so a router whose
    overlay fits only the packed core keeps it; a release without that copy
    falls back to the plain archive and says so.
-2. Free space beside the binary ≥ its size + 10 %.
+2. Free space beside the binary ≥ its size + 10 %; when there is less, the
+   update switches to the low-space mode below instead of steps 3–7.
 3. The archive streams straight into `<binary>.new` on the same filesystem:
    sha256 over the compressed bytes, gunzip, tar, only the `sing-box` entry
    is written — nothing lands in `/tmp` (RAM on a router). Before the write
@@ -1058,8 +1059,36 @@ version, its release asset (`Platform:` in `sing-box version`, e.g.
    10 s (every 500 ms), so an ordinary `restart` under procd no longer loses
    the race either.
 
+**Low-space mode.** A router whose `/usr/bin` sits on a small flash overlay
+cannot hold a second copy beside the binary (the plain linux-arm64 one is
+~76 MB). When the room check of step 2 or 3 fails — or with `--low-space` — the
+update keeps its copies in the temp directory (`/tmp`, RAM on a router) and the
+flash holds one binary at a time:
+
+1. Stage, flash untouched: the archive is extracted into
+   `/tmp/sing-box-lxd-update/`, the sum, `version` and `check` are verified as
+   above, and the running binary is gzipped there as the rollback copy. The
+   temp directory must have room for both (statfs capped by `MemAvailable`);
+   any failure here leaves nothing changed.
+2. The updater execs the staged new binary — a process started from
+   `/usr/bin/sing-box` pins that file, so removing it would free nothing.
+3. `stop` the service, wait until it has exited, remove the old binary, write
+   the new one (`.new`, fsync, rename), `start`. **The VPN is down for
+   10–20 s and the device must stay powered**: between the removal and the end
+   of the write there is no binary on the flash and the copy is in RAM.
+4. Health as in steps 7–8. A failed write (out of space included — on ubifs
+   and jffs2 the write itself is the check, statfs does not see compression),
+   a service that does not come up or a core that is not `started` restores
+   the old binary from the copy and starts it — exit 2. If even that fails —
+   exit 3: both copies stay in the temp directory and the log prints the
+   command that restores the old binary by hand.
+
+`--no-restart` is refused in this mode. A router stuck on a release without it
+needs the new binary run by hand once: its own updater still stops at the room
+check.
+
 Exit codes: `0` updated or already current, `1` nothing changed, `2` rolled
-back. Downloads honour `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`, so where
+back, `3` the low-space rollback failed. Downloads honour `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`, so where
 GitHub is unreachable the command can go through the core's own inbound:
 `"update": "HTTPS_PROXY=socks5://127.0.0.1:2080 /usr/bin/sing-box lxd update"`.
 TLS roots come from the system (`ca-bundle` on OpenWrt, which the installer
@@ -1205,7 +1234,7 @@ Error map:
 | `GET /admin/status` | `idle\|started\|fatal`, active/last-good sha, `last_error`, `interrupted_apply`, `hooks` (`enabled` and the last outcome per event: `state` `ok\|failed\|timeout\|skipped\|never`, `reason`, `exit_code`, `finished_at`, `detail` — §6a) |
 | `GET /admin/info` | identity card: version, state_dir, listen, tls, fingerprint, pid, uptime, log_path, `executable` and `executable_sha256` (the running binary — compare cores by hash, not by path; the hash is computed once at start and reads `""` for the first moments), and the platform card (SPEC 127): `goos`, `goarch`, `platform` (the release asset for this binary's platform, e.g. `linux-armv7`, `linux-mipsle-softfloat` — what to download for this machine), `init_system` (what runs the host: `procd` / `systemd` / `openrc` / `launchd` / `scm`, `""` when none is recognised), `service` (`true` when this process runs under it as a service) and `packed` (`true` when the running binary is a UPX-packed copy — download the `<platform>.upx.tar.gz` asset for it, as `lxd update` does) |
 | `POST /admin/enroll` | client registration with a one-time code |
-| `GET /admin/resources` · `PUT`/`GET`/`DELETE /admin/resources/{name}` | the files a config REFERS to (`.srs`, geo bases): list with sha256, upload, fetch, remove; 409 while the active or last-good config references the name |
+| `GET /admin/resources` · `PUT`/`GET`/`DELETE /admin/resources/{name}` | the files a config REFERS to (`.srs`, geo bases): list with sha256, upload, fetch, remove; while the active or last-good config references the name, `DELETE` answers 409 and `PUT` replaces only a rule-set (`.srs`/`.json`) the core can load — 422 if it cannot or the running core refuses it, 409 for any other file; the previous copy is kept until a core has reloaded or started with the new one (`"replace": "confirmed"` / `"pending"` in the answer) and comes back if a start fails |
 | `GET /admin/memory` | process memory: heap/stack/sys, goroutines, GC, and **two** RSS numbers — `rss_current_bytes` and `rss_peak_bytes` (raw bytes; the peak never decreases, so it is reported apart from the current size) |
 | `GET /admin/stats` | the **core's** uptime, `uplink_total`/`downlink_total`, active connections — all `null` (status still 200) when no core is up |
 | `GET /admin/logs?tail=N` | tail of `lxd.log` — the DAEMON's own log, which the gRPC log stream does not carry (that one carries the core's) |

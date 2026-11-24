@@ -30,6 +30,7 @@
 - [Сборка](#сборка)
 - [Конфигурация — короткий тур](#конфигурация--короткий-тур)
 - [Демон `lxd`](#демон-lxd)
+- [Известные проблемы и частые вопросы](#известные-проблемы-и-частые-вопросы)
 - [Как сопровождается форк](#как-сопровождается-форк)
 - [Карта репозитория](#карта-репозитория)
 - [Ссылки](#ссылки)
@@ -85,7 +86,7 @@ README — [на GitHub](https://github.com/SagerNet/sing-box/blob/main/README.m
 | Фича | Поверхность конфига | Что даёт | Build-тег | Статус |
 |---|---|---|---|---|
 | **Наблюдаемость** — [006](SPECS/FEATURES/006-OBSERVABILITY/FEATURE.md) | расширения `CommandClient` в libbox | `URLTestOutbound`, `GetRules`, `GetGroups`, `GetOutbounds`, `GetPool`, `GetDNSGroups`, `GetRunningConfig`, `GetChains`, `SubscribeDNSQueries`, `Connection.detourList` — то, на чём живёт Android-клиент | `with_lx_command` | выпущено, используется LxBox |
-| **Idle-suspend (энергия)** — [008](SPECS/FEATURES/008-ENERGY/FEATURE.md) | `lx.wg.idle_suspend` / `idle_suspend_reachable` / `idle_teardown`, `urltest` `mode: failover` | Три уровня сна для простаивающих WireGuard/AWG-эндпоинтов: батарея, нагрев и RAM на многоузловых мобильных профилях | `with_lx_idle_suspend` (вшит в AAR) | девайс-верифицирован: RSS −31 % |
+| **Idle-suspend (энергия)** — [008](SPECS/FEATURES/008-ENERGY/FEATURE.md) | `lx.wg.idle.suspend` / `suspend_reachable` / `teardown`, `urltest` `mode: failover` | Три уровня сна для простаивающих WireGuard/AWG-эндпоинтов: батарея, нагрев и RAM на многоузловых мобильных профилях | `with_lx_idle_suspend` (вшит в AAR) | девайс-верифицирован: RSS −31 % |
 | **Демон `lxd`** — [014](SPECS/FEATURES/014-LXD_DAEMON/FEATURE.md) | подкоманда `sing-box lxd` | Ядро in-process за управляющим каналом, который переживает любую смену конфига: gRPC + admin-REST на одном порту, `apply` с автоматическим откатом, mTLS с энролментом, установка службы, телеметрия хоста | `with_lxd` | девайс-верифицирован на macOS; OpenWrt-скрипты установки проверены в поле |
 
 > **Не поддерживается by design:** серверные половины перечисленного, кроме inbound `trusttunnel`; постквантовые **подписи** REALITY у Xray (`pqv` / ML-DSA-65) и `spiderX` — это другой механизм, не обмен ключами, и в sing-box его нет; отпечатки `edge`, `ios`, `android`, `360`, `qq` против Xray ≥ v26.9.8 (ни один апстримный пресет не несёт гибридного шара, у Xray та же граница; подменять отпечаток — работа приложений).
@@ -226,6 +227,22 @@ sing-box lxd --state-dir ./lxd-state -c config.json
 
 ---
 
+## Известные проблемы и частые вопросы
+
+### HTTP outbound: прокси, который перестал отвечать на `CONNECT`, копит память
+
+Открытый issue [#74](https://github.com/Leadaxe/sing-box-lx/issues/74). Если `http`-outbound смотрит на прокси, который принимает TCP-соединение, но так и не отвечает на запрос `CONNECT` (или присылает неполные заголовки), ядро ждёт бесконечно. Каждая новая попытка оставляет за собой ещё одну горутину, её сокеты и буферы; ничто их не освобождает, даже возвращение прокси. За долгий простой процесс растёт по памяти и файловым дескрипторам, пока его не перезапустят. Воспроизведено на `v1.14.4-lx.33` и на текущем `lx`; прокси, который отвечает ошибкой (например `503`), этого не вызывает. Исправление (дедлайн на рукопожатие `CONNECT`) предложено в [PR #73](https://github.com/Leadaxe/sing-box-lx/pull/73) и пока не влито. До тех пор всё накопленное освобождает перезапуск ядра.
+
+### Xray Mux.Cool — не `multiplex` из sing-box
+
+`mux` в Xray (Mux.Cool) и блок `multiplex` в sing-box — разные протоколы с одной идеей. `multiplex` говорит на sing-mux (`smux` / `yamux` / `h2mux`) и работает, только если сервер — sing-box с включённым multiplex; Xray-сервер его не понимает, и узел перестаёт пропускать трафик. Поэтому `mux` из Xray-ссылки или подписки нельзя переводить в `multiplex` — его надо отбросить. Для UDP ничего не теряется: `vless`-outbound и так по умолчанию упаковывает UDP в XUDP (UDP поверх Mux.Cool в Xray), см. `packet_encoding` в справочнике [VLESS outbound](https://sing-box.sagernet.org/configuration/outbound/vless/).
+
+### REALITY: `reality verification failed` после обновления Xray на сервере
+
+Xray ≥ v26.9.8 принимает REALITY-приветствие только с гибридным постквантовым key share `X25519MLKEM768`. Нужен отпечаток `chrome`, `firefox` или `safari` и пустой `key_share` — см. [REALITY: отпечаток и `key_share`](#reality-отпечаток-и-key_share). Такое приветствие весит около 1,7 КБ и уходит двумя TCP-сегментами; некоторые сети, мобильные чаще, теряют второй сегмент, и рукопожатие висит без ошибки. Рычаги — `record_fragment` или `detour` на новом сервере и `key_share: classical` на старом. Таблица симптомов — [xray-protocols-explained.ru.md §2.7](docs-lx/xray-protocols-explained.ru.md#27-типичные-отказы) ([EN](docs-lx/xray-protocols-explained.md#27-typical-failures)).
+
+---
+
 ## Как сопровождается форк
 
 ```
@@ -251,6 +268,8 @@ upstream/stable  ──merge──►  lx  =  upstream  +  швы // lx  +  lx-�
 | Роутеры OpenWrt | сборки mips / musl | бинарь как `lxd` вместе со скриптами установки |
 
 Маппинг ссылок подписок на поля конфига — работа потребителя; сам JSON конфига везде одинаков.
+
+Сторонние проекты, которые поставляют это ядро, встраивают его или строятся на нём — роутеры, десктопные и мобильные клиенты, панели, инструменты — перечислены в **[docs-lx/consumers.ru.md](docs-lx/consumers.ru.md)** ([EN](docs-lx/consumers.md)).
 
 ---
 
@@ -294,6 +313,7 @@ upstream/stable  ──merge──►  lx  =  upstream  +  швы // lx  +  lx-�
 | Руководство по энергии | [docs-lx/lx-energy.ru.md](docs-lx/lx-energy.ru.md) ([EN](docs-lx/lx-energy.md)) — уровни idle-suspend, `mode: failover`, тюнинг |
 | Снифферы | [docs-lx/lx-sniff.ru.md](docs-lx/lx-sniff.ru.md) ([EN](docs-lx/lx-sniff.md)) |
 | Руководство оператора `lxd` | [docs-lx/lxd-daemon.ru.md](docs-lx/lxd-daemon.ru.md) ([EN](docs-lx/lxd-daemon.md)) |
+| Кто использует ядро | [docs-lx/consumers.ru.md](docs-lx/consumers.ru.md) ([EN](docs-lx/consumers.md)) — собственные потребители и сторонние проекты на базе sing-box-lx |
 | API наблюдаемости | [docs-lx/lxd-grpc-api.ru.md](docs-lx/lxd-grpc-api.ru.md) ([EN](docs-lx/lxd-grpc-api.md)) — контракт, на котором говорят клиенты, и gRPC-демон, и Android-AAR |
 | Разбор OpenWrt | [docs-lx/openwrt-vpn-ssid.ru.md](docs-lx/openwrt-vpn-ssid.ru.md) ([EN](docs-lx/openwrt-vpn-ssid.md)) |
 | Раннбук релиза | [docs-lx/lx-release-runbook.ru.md](docs-lx/lx-release-runbook.ru.md) ([EN](docs-lx/lx-release-runbook.md)) |

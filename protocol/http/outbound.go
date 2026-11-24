@@ -34,10 +34,19 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	if err != nil {
 		return nil, err
 	}
-	detour, err := tls.NewDialerFromOptions(ctx, logger, outboundDialer, options.Server, common.PtrValueOrDefault(options.TLS))
+	detour, err := tls.NewDialerFromOptions(outboundDialer, tls.ClientOptions{
+		Context:        ctx,
+		Logger:         logger,
+		ServerAddress:  options.Server,
+		Options:        common.PtrValueOrDefault(options.TLS),
+		DomainResolver: options.DomainResolver,
+	})
 	if err != nil {
 		return nil, err
 	}
+	// lx:begin SPEC 161 — bound CONNECT after the underlying dial
+	detour = &httpHandshakeDialerLx{Dialer: detour}
+	// lx:end SPEC 161
 	return &Outbound{
 		Adapter: outbound.NewAdapterWithDialerOptions(C.TypeHTTP, tag, []string{N.NetworkTCP}, options.DialerOptions),
 		logger:  logger,
@@ -57,7 +66,9 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 	metadata.Outbound = h.Tag()
 	metadata.Destination = destination
 	h.logger.InfoContext(ctx, "outbound connection to ", destination)
-	return h.client.DialContext(ctx, network, destination)
+	// lx:begin SPEC 161 — bound CONNECT without changing the dial deadline
+	return dialHTTPWithHandshakeTimeoutLx(ctx, h.client, network, destination)
+	// lx:end SPEC 161
 }
 
 func (h *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {

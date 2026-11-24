@@ -70,6 +70,10 @@ type Endpoint struct {
 	resumeErrHook func() error
 	// lx: SPEC 145 — session start for the per-peer status (peer_session_lx.go).
 	session peerSession
+	// lx: issue #75 — guards the load and the store of tunDevice, returnDevice,
+	// device, allowedIPs and the cached port addresses; never held across a call
+	// on a device (endpoint_snapshot_lx.go).
+	deviceAccess sync.RWMutex
 }
 
 // SetResumeErrHookForTest injects a Resume failure. Test-only.
@@ -231,7 +235,7 @@ func NewEndpoint(options EndpointOptions) (*Endpoint, error) {
 // Teardown releases EVERYTHING this endpoint holds — the wireguard device AND
 // the tun device with its gVisor netstack (~5.9 MB) — while keeping the recipe
 // (options/peers/ipcConf) so Rebuild can bring it back. SPEC 020 level 3: the
-// tick calls it for an endpoint that has been asleep past lx_idle_teardown.
+// tick calls it for an endpoint that has been asleep past lx.wg.idle.teardown.
 // Idempotent; the endpoint stays flagged suspended (only a dial rebuilds it).
 func (e *Endpoint) Teardown() {
 	e.suspended.Store(true)
@@ -242,12 +246,12 @@ func (e *Endpoint) Teardown() {
 	if e.device != nil {
 		e.device.Down()
 		e.device.Close()
-		e.device = nil
+		e.storeDevice(nil) // issue #75
 	}
 	e.resetSession() // lx: SPEC 145 — a rebuilt device counts from zero
 	e.pauseOpAccess.Unlock()
 	e.closeTunDevice()
-	e.allowedIPs = nil
+	e.storeAllowedIPs(nil) // issue #75
 	if e.pauseCallback != nil {
 		e.pause.UnregisterCallback(e.pauseCallback)
 		e.pauseCallback = nil
@@ -259,31 +263,23 @@ func (e *Endpoint) Teardown() {
 // before the teardown, so a rebuild does not re-resolve unless a peer is
 // domain-based and was never resolved. lx: SPEC 020 level 3.
 func (e *Endpoint) Rebuild() error {
-	if e.tunDevice != nil {
+	if e.loadTunDevice() != nil {
 		return nil // never torn down (or already rebuilt)
 	}
 	tunDevice, err := newDeviceFn(e.deviceOptions) // lx: SPEC 097 — counted in tests
 	if err != nil {
 		return E.Cause(err, "rebuild WireGuard device")
 	}
-	e.tunDevice = tunDevice
-	// Carry the attached L3 return path over to the fresh wrapper: sing-tun
-	// attached it once (AttachReturn) and will not re-attach after a rebuild it
-	// knows nothing about — dropping it would silently break the L3 downlink.
-	returnDevice := &returnDeviceWrapper{Device: tunDevice}
-	if previous := e.returnDevice.state.Load(); previous != nil {
-		returnDevice.state.Store(previous)
-	}
-	e.returnDevice = returnDevice
-	e.inet4Address = tunDevice.Inet4Address()
-	e.inet6Address = tunDevice.Inet6Address()
+	// The fresh return-path wrapper inherits the attached L3 return path; the
+	// swap is exclusive with AttachReturn (issue #75, endpoint_snapshot_lx.go).
+	e.installTunDevice(tunDevice)
 	e.suspended.Store(false)
 	return nil
 }
 
 // TornDown reports whether the tun device is currently released (level 3).
 func (e *Endpoint) TornDown() bool {
-	return e.tunDevice == nil
+	return e.loadTunDevice() == nil
 }
 
 // lx:end idle-suspend
@@ -304,6 +300,11 @@ func (e *Endpoint) Start(postStart bool) error {
 		standardBind := conn.NewStdNetBind(listenerControl).(*conn.StdNetBind)
 		if e.options.ListenPort == 0 && len(e.peers) == 1 && e.peers[0].endpoint.IsValid() {
 			standardBind.SetSinglePeerMode()
+			e.connectStandardBind(standardBind) // lx: SPEC 160 — lx.wg.connected_socket
+		}
+		// lx: SPEC 158 part 2 — lx.wg.buffers.read_datagram_count
+		if err := e.tuneStandardBind(standardBind); err != nil {
+			return err
 		}
 		if egressEnabled {
 			egressPoolOptions := e.options.EgressPoolOptions
@@ -365,6 +366,7 @@ func (e *Endpoint) Start(postStart bool) error {
 		},
 	}
 	wgDevice := device.NewDevice(e.options.Context, e.returnDevice, bind, logger, e.options.Workers)
+	e.tuneDevice(wgDevice) // lx: SPEC 158 part 2 — lx.wg.buffers.send_by_mtu
 	// lx: SPEC 041 — passive self-heal: on handshake give-up the device rebinds
 	// its socket (fresh ephemeral port unless the user pinned listen_port) and
 	// re-initiates, so a dead NAT/DPI flow entry cannot hold the endpoint in
@@ -431,12 +433,12 @@ func (e *Endpoint) Start(postStart bool) error {
 		wgDevice.Close()
 		return E.Cause(err, "setup wireguard: \n", ipcConf.String())
 	}
-	e.device = wgDevice
+	e.storeDevice(wgDevice) // lx: issue #75
 	e.pause = service.FromContext[pause.Manager](e.options.Context)
 	if e.pause != nil {
 		e.pauseCallback = e.pause.RegisterCallback(e.onPauseUpdated)
 	}
-	e.allowedIPs = wgDevice.AllowedIPs()
+	e.storeAllowedIPs(wgDevice.AllowedIPs()) // lx: issue #75
 	return nil
 }
 
@@ -444,22 +446,14 @@ func (e *Endpoint) DialContext(ctx context.Context, network string, destination 
 	if !destination.Addr.IsValid() {
 		return nil, E.Cause(os.ErrInvalid, "invalid non-IP destination")
 	}
-	// lx: SPEC 020 level 3 — a torn-down endpoint has no tun device; the protocol
-	// layer rebuilds before dialing, so reaching here means a caller bypassed it.
-	if e.tunDevice == nil {
-		return nil, E.New("WireGuard endpoint is torn down")
-	}
-	return e.tunDevice.DialContext(ctx, network, destination)
+	return e.dialTunDevice(ctx, network, destination) // lx: SPEC 020 level 3 + issue #75 — nil-safe, one read of tunDevice; upstream: e.tunDevice.DialContext
 }
 
 func (e *Endpoint) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
 	if !destination.Addr.IsValid() {
 		return nil, E.Cause(os.ErrInvalid, "invalid non-IP destination")
 	}
-	if e.tunDevice == nil { // lx: SPEC 020 level 3
-		return nil, E.New("WireGuard endpoint is torn down")
-	}
-	return e.tunDevice.ListenPacket(ctx, destination)
+	return e.listenTunDevice(ctx, destination) // lx: SPEC 020 level 3 + issue #75 — upstream: e.tunDevice.ListenPacket
 }
 
 func (e *Endpoint) Close() error {
@@ -482,7 +476,7 @@ func (e *Endpoint) Close() error {
 	if e.device != nil {
 		e.device.Down()
 		e.device.Close()
-		e.device = nil
+		e.storeDevice(nil) // lx: issue #75
 		return nil
 	}
 	return e.closeTunDevice() // lx: SPEC 020 level 3 — see endpoint_close_lx.go
@@ -500,8 +494,8 @@ func (e *Endpoint) Close() error {
 // that Down zeroes the crypto session, so Resume pays a fresh handshake.
 func (e *Endpoint) Suspend() {
 	e.suspended.Store(true)
-	if e.device != nil {
-		e.device.Down()
+	if wgDevice := e.loadDevice(); wgDevice != nil { // issue #75
+		wgDevice.Down()
 		e.markSessionDown() // lx: SPEC 145
 	}
 }
@@ -522,9 +516,9 @@ func (e *Endpoint) Resume() error {
 	if e.resumeErrHook != nil { // tests only: stand in for a device.Up() failure
 		return e.resumeErrHook()
 	}
-	if e.device != nil {
+	if wgDevice := e.loadDevice(); wgDevice != nil { // issue #75
 		e.markSessionUp() // lx: SPEC 145
-		return e.device.Up()
+		return wgDevice.Up()
 	}
 	return nil
 }
@@ -534,7 +528,7 @@ func (e *Endpoint) Resume() error {
 // stack). lx: SPEC 020 — precise, keepalive-immune "live flows" gate for the
 // idle tick.
 func (e *Endpoint) ActiveTCPFlows() uint64 {
-	if counter, ok := e.tunDevice.(interface{ CurrentEstablished() uint64 }); ok {
+	if counter, ok := e.loadTunDevice().(interface{ CurrentEstablished() uint64 }); ok { // issue #75
 		return counter.CurrentEstablished()
 	}
 	return 0
@@ -549,7 +543,7 @@ func (e *Endpoint) ActiveTCPFlows() uint64 {
 // suspend candidates (unreachable + dial-idle), so the IpcGet string round-trip
 // is off the hot path. Returns 0 for a nil device.
 func (e *Endpoint) TransferTotals() uint64 {
-	dev := e.device
+	dev := e.loadDevice() // issue #75
 	if dev == nil {
 		return 0
 	}
@@ -575,24 +569,26 @@ func (e *Endpoint) TransferTotals() uint64 {
 // lx:end awg
 
 func (e *Endpoint) Lookup(address netip.Addr) *device.Peer {
-	if e.allowedIPs == nil {
+	allowedIPs := e.loadAllowedIPs() // lx: issue #75 — one snapshot; upstream reads e.allowedIPs twice
+	if allowedIPs == nil {
 		return nil
 	}
-	return e.allowedIPs.LookupFromPacket(netip.Addr{}, address, nil)
+	return allowedIPs.LookupFromPacket(netip.Addr{}, address, nil)
 }
 
 func (e *Endpoint) BindUpdate() error {
-	if e.device == nil {
+	wgDevice := e.loadDevice() // lx: issue #75 — one snapshot; upstream reads e.device twice
+	if wgDevice == nil {
 		return nil
 	}
-	return e.device.BindUpdate()
+	return wgDevice.BindUpdate()
 }
 
 // lx: SPEC 041 v2 — wake-nudge passthrough: rebind the device's socket now if
 // its session is provably dead (see device.RebindIfSessionStale). Nil-safe
 // over a torn-down endpoint (SPEC 020 level 3 releases the device).
 func (e *Endpoint) RebindIfSessionStale() bool {
-	wgDevice := e.device
+	wgDevice := e.loadDevice() // issue #75
 	if wgDevice == nil {
 		return false
 	}

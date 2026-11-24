@@ -60,7 +60,7 @@ loopback-only; лаунчер обязан доставать до них по �
 | Эндпоинт | Семантика |
 |---|---|
 | `GET /admin/resources` | список: `[{name, sha256, size, path}]` — клиент забирает разом, дифает хеши |
-| `PUT /admin/resources/{name}` | залить/перезаписать; тело = сырые байты; ответ `{name, sha256, size, path}`; **409** если на `name` ссылается активный или last-good конфиг (гуард B2) |
+| `PUT /admin/resources/{name}` | залить/перезаписать; тело = сырые байты; ответ `{name, sha256, size, path}`; занятое имя (на него ссылается активный или last-good конфиг): набор правил `.srs`/`.json` заменяется после проверки, с прежней копией до подтверждения ядром; негодный — **422**, прочие файлы — **409** (гуард B2, [SPEC 159](../159-LXD_RESOURCE_REPLACE/SPEC.md)) |
 | `GET /admin/resources/{name}` | метадата одного имени `{name, sha256, size, path}`; 404 если нет — «дай хеш по имени» |
 | `GET /admin/resources/{name}/content` | скачать сырые байты (проверка/бэкап); `Content-Type: application/octet-stream`; 404 если нет |
 | `DELETE /admin/resources/{name}` | удалить; **409** если на `name` ссылается активный или last-good конфиг; 404 если нет |
@@ -84,9 +84,16 @@ POST /admin/apply             → конфиг, где path ссылается �
 чтобы заменить занятый ресурс — сперва `apply` конфига без этой ссылки, затем
 трогать файл.
 
+Исключение — набор правил ([SPEC 159](../159-LXD_RESOURCE_REPLACE/SPEC.md)):
+`PUT` занятого `.srs`/`.json` разрешён, если ядро способно его загрузить; иначе
+**422**, файл не тронут. Прежние байты хранятся, пока ядро не подтвердило новые
+(перечитало на ходу или стартовало с ними), и возвращаются при неудавшемся старте.
+
 - «Занятость» = подстрочное вхождение `<state_dir>/resources/<name>` (или просто
   `/resources/<name>` — окончательная форма проверки в реализации) в
   `controller.activeContent` **или** в last-good из `store.LoadLastGood()`.
+  Разделители перед сравнением приводятся к `/`: Windows-путь в тексте конфига
+  записан как `\\resources\\<name>` (SPEC 159).
   Дешёвая текстовая проверка; она умышленно консервативна (лучше ложно-занят и
   409, чем ложно-свободен и дырявый rollback).
 - Проверка сериализуется тем же `applyAccess`-мьютексом, что и apply: гонка
@@ -131,8 +138,8 @@ POST /admin/apply             → конфиг, где path ссылается �
   ядро видит файл, валидация проходит. **(живьём на macOS: реальный `.srs` из
   `rule-set compile`, apply → `applied:true`, `status:started`; освобождение +
   delete + traversal-400 проверены на живом демоне)**
-- [x] `PUT`/`DELETE` для имени, на которое ссылается активный ИЛИ last-good
-  конфиг → 409; файл не тронут.
+- [x] `DELETE` любого и `PUT` не-набора для имени, на которое ссылается активный
+  ИЛИ last-good конфиг → 409; файл не тронут. `PUT` набора правил — SPEC 159.
   (`TestResourcePutConflictWhenReferenced`, `TestResourceDeleteConflictWhenReferenced`,
   `TestResourceReferencedByActiveConfig`, `TestResourceReferencedByLastGood`)
 - [x] `PUT`/`DELETE` для свободного имени → успех.
