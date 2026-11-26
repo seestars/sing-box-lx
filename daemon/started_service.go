@@ -24,6 +24,7 @@ import (
 	"github.com/sagernet/sing-box/protocol/group"
 	"github.com/sagernet/sing-box/service/oomkiller"
 	"github.com/sagernet/sing/common"
+	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/memory"
 	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/common/observable"
@@ -907,6 +908,7 @@ type connectionSnapshot struct {
 	uplink     int64
 	downlink   int64
 	hadTraffic bool
+	actualLx   *trafficcontrol.TrackerMetadata // lx: SPEC 138 — last view sent, see refreshActualLx
 }
 
 func (s *StartedService) buildInitialConnectionState(manager *trafficcontrol.Manager, snapshots map[uuid.UUID]connectionSnapshot) []*ConnectionEvent {
@@ -921,6 +923,7 @@ func (s *StartedService) buildInitialConnectionState(manager *trafficcontrol.Man
 		snapshots[metadata.ID] = connectionSnapshot{
 			uplink:   metadata.Upload.Load(),
 			downlink: metadata.Download.Load(),
+			actualLx: sentActualLx(metadata), // lx: SPEC 138
 		}
 	}
 
@@ -946,6 +949,7 @@ func (s *StartedService) applyConnectionEvent(event trafficcontrol.ConnectionEve
 		snapshots[event.ID] = connectionSnapshot{
 			uplink:   event.Metadata.Upload.Load(),
 			downlink: event.Metadata.Download.Load(),
+			actualLx: sentActualLx(event.Metadata), // lx: SPEC 138
 		}
 		return &ConnectionEvent{
 			Type:       ConnectionEventType_CONNECTION_EVENT_NEW,
@@ -991,6 +995,7 @@ func (s *StartedService) buildTrafficUpdates(manager *trafficcontrol.Manager, sn
 			snapshots[metadata.ID] = connectionSnapshot{
 				uplink:   currentUpload,
 				downlink: currentDownload,
+				actualLx: sentActualLx(metadata), // lx: SPEC 138
 			}
 			events = append(events, &ConnectionEvent{
 				Type:       ConnectionEventType_CONNECTION_EVENT_NEW,
@@ -999,6 +1004,13 @@ func (s *StartedService) buildTrafficUpdates(manager *trafficcontrol.Manager, sn
 			})
 			continue
 		}
+		// lx:begin SPEC 138 — the node a per-connection group picked became known
+		if refreshed := refreshActualLx(metadata, &snapshot); refreshed != nil {
+			snapshots[metadata.ID] = snapshot
+			events = append(events, refreshed)
+			continue
+		}
+		// lx:end SPEC 138
 		uplinkDelta := currentUpload - snapshot.uplink
 		downlinkDelta := currentDownload - snapshot.downlink
 		if uplinkDelta < 0 || downlinkDelta < 0 {
@@ -2154,4 +2166,36 @@ func (s *StartedService) Instance() *Instance {
 	s.serviceAccess.RLock()
 	defer s.serviceAccess.RUnlock()
 	return s.instance
+}
+
+func (s *StartedService) WaitStartedInstance(ctx context.Context) (*Instance, error) {
+	subscription, done, err := s.serviceStatusObserver.Subscribe()
+	if err != nil {
+		return nil, err
+	}
+	defer s.serviceStatusObserver.UnSubscribe(subscription)
+	for {
+		s.serviceAccess.RLock()
+		currentStatus := s.serviceStatus
+		instance := s.instance
+		s.serviceAccess.RUnlock()
+		switch currentStatus.Status {
+		case ServiceStatus_STARTED:
+			return instance, nil
+		case ServiceStatus_STARTING, ServiceStatus_STOPPING:
+		case ServiceStatus_FATAL:
+			return nil, E.New(currentStatus.ErrorMessage)
+		default:
+			return nil, os.ErrInvalid
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-s.ctx.Done():
+			return nil, s.ctx.Err()
+		case <-subscription:
+		case <-done:
+			return nil, os.ErrClosed
+		}
+	}
 }
